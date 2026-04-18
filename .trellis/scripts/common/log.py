@@ -1,0 +1,1 @@
+"""Log common module."""

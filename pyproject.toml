@@ -1,0 +1,104 @@
+[tool.poetry]
+name = "physics-nlo-eval"
+version = "0.1.0"
+description = "Physics NLO Eval for Optical Networks"
+authors = ["Xiangrong Li <zerosignal0101@proton.me>"]
+license = "GPL-3.0"
+readme = "README.md"
+homepage = "https://github.com/zerosignal0101/physics-nlo-eval"
+repository = "https://github.com/zerosignal0101/physics-nlo-eval"
+documentation = "https://physics-nlo-eval.readthedocs.io"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+]
+
+[tool.poetry.urls]
+Changelog = "https://github.com/zerosignal0101/physics-nlo-eval/releases"
+
+[tool.poetry.requires-plugins]
+poetry-plugin-export = ">=1.8"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<=3.13"
+click = ">=8.0.1"
+numpy = "1.26.4"
+scipy = "^1.17.1"
+numba = "^0.64.0"
+pydantic = "2.12.5"
+
+[tool.poetry.group.dev.dependencies]
+Pygments = ">=2.10.0"
+coverage = {extras = ["toml"], version = ">=6.2"}
+darglint = ">=1.8.1"
+ruff = ">=0.15.0"
+furo = ">=2021.11.12"
+mypy = ">=0.930"
+pep8-naming = ">=0.12.1"
+pre-commit = ">=2.16.0"
+pre-commit-hooks = ">=4.1.0"
+pytest = ">=6.2.5"
+safety = ">=1.10.3"
+sphinx = ">=6.0.1"
+sphinx-autobuild = ">=2021.3.14"
+sphinx-click = ">=3.0.2"
+typeguard = ">=2.13.3"
+xdoctest = {extras = ["colors"], version = ">=0.15.10"}
+myst-parser = {version = ">=0.16.1"}
+numpydoc = "^1.10.0"
+sphinx-gallery = "^0.20.0"
+matplotlib = "^3.10.6"
+
+[tool.poetry.scripts]
+physics-nlo-eval = "physics_nlo_eval.__main__:main"
+
+[tool.coverage.paths]
+source = ["src", "*/site-packages"]
+tests = ["tests", "*/tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["physics_nlo_eval", "tests"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [".trellis", ".claude"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",  # flake8 基础
+    "B",            # flake8-bugbear
+    "I",            # isort
+    "UP",           # pyupgrade
+    "D",            # pydocstyle (替代 flake8-docstrings)
+    "S",            # flake8-bandit
+]
+ignore = [
+    "D100",  # 公共 module doc
+    "D104",  # 公共 package doc
+    "D106",  # 嵌套类 doc
+    "D400",  # 第一行末尾使用 . 结尾
+    "F841",  # 未使用的变量
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["S101"]  # 允许测试中使用 assert
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+pretty = true
+show_column_numbers = true
+show_error_codes = true
+show_error_context = true
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
