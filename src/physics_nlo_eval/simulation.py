@@ -54,8 +54,8 @@ def run_simulation() -> None:
     # Fiber parameters
     fiber_length_km = 80.0
     fiber_alpha_db_per_km = 0.2
-    fiber_beta2_ps2_per_km = -21.6
-    fiber_gamma_inv_w_inv_km = 1.3
+    fiber_beta2_ps2_per_m = -21.6e-27
+    fiber_beta3_ps3_per_m = 0.12e-39
     fiber_d_pmd_ps_per_sqrt_km = 0.1  # ps/sqrt(km)
 
     # EDFA parameters
@@ -117,8 +117,8 @@ def run_simulation() -> None:
             FiberChannel(
                 length_m=fiber_length_km * 1000,
                 alpha_db_per_km=fiber_alpha_db_per_km,
-                beta2_ps2_per_km=fiber_beta2_ps2_per_km,
-                gamma_inv_w_inv_km=fiber_gamma_inv_w_inv_km,
+                beta2_ps2_per_m=fiber_beta2_ps2_per_m,
+                beta3_ps3_per_m=fiber_beta3_ps3_per_m,
                 d_pmd_ps_per_sqrt_km=fiber_d_pmd_ps_per_sqrt_km,
                 step_size_m=10000.0,  # 10 km step
             ),
@@ -162,7 +162,7 @@ def run_simulation() -> None:
     # Time Domain DSP
     # rx_dsp_pipeline_blocks.append(ChromaticDispersionComp(
     #     fiber_length_km=fiber_length_km, # Compensate known fiber length
-    #     beta2_ps2_per_km=fiber_beta2_ps2_per_km
+    #     beta2_ps2_per_m=fiber_beta2_ps2_per_km
     # ))
     rx_dsp_pipeline_blocks.append(FOCoarse(search_range_hz=10e6))  # Compensate LO freq offset
 
