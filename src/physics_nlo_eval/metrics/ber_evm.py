@@ -1,154 +1,162 @@
-"""判决和 BER/EVM 计算模块。"""
+"""判决和 BER/EVM 计算所需的解映射模块。"""
+
+import re
 
 import numpy as np
 
 from physics_nlo_eval.core.base import BaseBlock
 from physics_nlo_eval.core.signal import Signal
 
+# 复用 Mapper 中的格雷逆转换
+from physics_nlo_eval.tx.mapper import _gray_to_binary
+
 
 class Demapper(BaseBlock):
     """符号到比特的解映射模块。
 
-    将接收到的 QAM 符号判决到最近的理想星座点，并转换为比特流。
+    将接收到的符号判决到最近的理想星座点，解映射并恢复原始比特流。
 
     Parameters
     ----------
     modulation : str
-        调制格式，例如 'DP-16QAM', 'SP-64QAM'。
+        调制格式。
     power_norm : bool, optional
         星座图是否进行了功率归一化。
+    diff_coding : bool, optional
+        是否启用象限差分解码。
+    prob_shaping : dict[str, float] | None, optional
+        概率整形参数，须与 Mapper 保持一致。
     """
 
-    _constellations: dict[str, np.ndarray] = {}
-
-    def __init__(self, modulation: str = "DP-16QAM", power_norm: bool = True) -> None:
-        """初始化 Demapper。"""
+    def __init__(
+        self,
+        modulation: str = "DP-16QAM",
+        power_norm: bool = True,
+        diff_coding: bool = False,
+        prob_shaping: dict[str, float] | None = None,
+    ) -> None:
         super().__init__(name=f"Demapper({modulation})")
-        self.modulation = modulation
+        self.modulation = modulation.upper()
         self.power_norm = power_norm
+        self.diff_coding = diff_coding
+        self.prob_shaping = prob_shaping
+
         self.n_pol: int
         self.m_ary: int
         self.bits_per_symbol: int
+        self.lut: np.ndarray
 
         self._parse_modulation()
-        self._generate_constellation()
+        self._generate_constellation_and_lut()
 
     def _parse_modulation(self) -> None:
-        """解析调制格式字符串，提取偏振数量和 M 值。"""
-        parts = self.modulation.split("-")
-        if len(parts) != 2:
-            raise ValueError(f"Invalid modulation string: {self.modulation}. Expected format 'DP-16QAM'.")
+        """解析调制格式 (逻辑与 Mapper 相同)"""
+        match = re.match(r"^(DP|SP)-(OOK|BPSK|QPSK|(\d+)QAM)$", self.modulation)
+        if not match:
+            raise ValueError(f"Invalid modulation string: {self.modulation}.")
 
-        pol_type, qam_m = parts[0], parts[1]
-
-        if pol_type.upper() == "DP":
-            self.n_pol = 2
-        elif pol_type.upper() == "SP":
-            self.n_pol = 1
-        else:
-            raise ValueError(f"Invalid polarization type: {pol_type}. Expected 'DP' or 'SP'.")
-
-        if not qam_m.endswith("QAM"):
-            raise ValueError(f"Invalid QAM type: {qam_m}. Expected '16QAM' or '64QAM'.")
-
-        self.m_ary = int(qam_m[:-3])
-        if not np.log2(self.m_ary).is_integer():
-            raise ValueError(f"M must be a power of 2: {self.m_ary}.")
+        pol_type, mod_type, qam_m = match.groups()
+        self.n_pol = 2 if pol_type == "DP" else 1
+        self.m_ary = 2 if mod_type in ["OOK", "BPSK"] else (4 if mod_type == "QPSK" else int(qam_m))
         self.bits_per_symbol = int(np.log2(self.m_ary))
 
-    def _generate_constellation(self) -> None:
-        """生成 QAM 星座图。"""
-        key = f"{self.m_ary}QAM_norm={self.power_norm}"
-        if key in Demapper._constellations:
-            return
+    def _generate_constellation_and_lut(self) -> None:
+        """生成接收端参考星座图。"""
+        # (生成逻辑同 Mapper，为避免重复代码，在实际框架中这部分应提取为基类或 utils)
+        if self.modulation.endswith("OOK"):
+            constellation = np.array([0.0, 1.0], dtype=np.complex128)
+        elif self.modulation.endswith("BPSK"):
+            constellation = np.array([-1.0, 1.0], dtype=np.complex128)
+        else:
+            sqrt_m = int(np.sqrt(self.m_ary))
+            idx = np.arange(sqrt_m)
+            bin_val = _gray_to_binary(idx)
+            pam_levels = 2 * bin_val - (sqrt_m - 1)
+            i_grid, q_grid = np.meshgrid(pam_levels, pam_levels, indexing="ij")
+            constellation = (i_grid + 1j * q_grid).flatten()
 
-        sqrt_m = int(np.sqrt(self.m_ary))
-        if not sqrt_m * sqrt_m == self.m_ary:
-            raise ValueError(f"Only square QAM constellations are supported for M={self.m_ary}.")
-
-        levels = np.arange(-sqrt_m + 1, sqrt_m, 2)
-        constellation = (levels[np.newaxis, :] + 1j * levels[:, np.newaxis]).flatten()
+        if self.prob_shaping and "nu" in self.prob_shaping:
+            nu = self.prob_shaping["nu"]
+            probs = np.exp(-nu * (np.abs(constellation) ** 2))
+            probs /= np.sum(probs)
+        else:
+            probs = np.ones(self.m_ary) / self.m_ary
 
         if self.power_norm:
-            constellation /= np.sqrt(np.mean(np.abs(constellation) ** 2))
+            constellation /= np.sqrt(np.sum(probs * (np.abs(constellation) ** 2)))
 
-        Demapper._constellations[key] = constellation
+        self.lut = constellation
+
+    def _diff_decode(self, symbol_indices: np.ndarray) -> np.ndarray:
+        """基于象限的差分解码。"""
+        if self.m_ary < 4:
+            return symbol_indices
+
+        k_per_dim = self.bits_per_symbol // 2
+        i_sign_bit = (symbol_indices >> (self.bits_per_symbol - 1)) & 1
+        q_sign_bit = (symbol_indices >> (k_per_dim - 1)) & 1
+
+        quad_bits = (i_sign_bit << 1) | q_sign_bit
+        decoded_quad = np.zeros_like(quad_bits)
+
+        # 差分减法
+        decoded_quad[0] = quad_bits[0]  # 第一位参考
+        decoded_quad[1:] = (quad_bits[1:] - quad_bits[:-1]) % 4
+
+        mask = ~((1 << (self.bits_per_symbol - 1)) | (1 << (k_per_dim - 1)))
+        new_indices = (
+            (symbol_indices & mask)
+            | ((decoded_quad >> 1) << (self.bits_per_symbol - 1))
+            | ((decoded_quad & 1) << (k_per_dim - 1))
+        )
+        return new_indices
 
     def _demap_symbols_to_bits(self, symbols: np.ndarray) -> np.ndarray:
-        """
-        将 QAM 符号判决并解映射为比特流。
-
-        Parameters
-        ----------
-        symbols : np.ndarray
-            输入 QAM 符号，形状为 (N_symbols,)。
-
-        Returns
-        -------
-        np.ndarray
-            解映射后的比特流，形状为 (N_bits,)。
-        """
-        constellation = Demapper._constellations[f"{self.m_ary}QAM_norm={self.power_norm}"]
-
-        # 判决到最近的星座点
-        # Calculate Euclidean distance from each received symbol to all constellation points
-        distances = np.abs(symbols[:, np.newaxis] - constellation[np.newaxis, :])
-
-        # Find index of the nearest constellation point
+        """极速解映射：欧式距离判决 + 向量化位运算解包。"""
+        # 广播计算欧式距离 (N_sym, M_ary)
+        # 如果 symbols 非常大，可使用分块 (chunking) 避免 OOM，但通常足够
+        distances = np.abs(symbols[:, np.newaxis] - self.lut[np.newaxis, :])
         decision_indices = np.argmin(distances, axis=1)
 
-        # Convert index back to bits (inverse of Gray mapping)
-        # This needs a proper Gray code lookup table.
-        # For simplicity, we convert index to binary string then flatten.
-        # Assumes direct binary mapping for now.
+        if self.diff_coding:
+            decision_indices = self._diff_decode(decision_indices)
 
-        bit_strings: list[str] = []
-        for idx in decision_indices:
-            # Convert decimal index to binary string, padded with leading zeros
-            bit_string = format(idx, f"0{self.bits_per_symbol}b")
-            bit_strings.append(bit_string)
+        # 向量化整数到比特重组 (比原版字符串拼接快数百倍)
+        powers_of_two = 1 << np.arange(self.bits_per_symbol - 1, -1, -1)
+        bits_reshaped = (decision_indices[:, np.newaxis] & powers_of_two) > 0
 
-        # Flatten list of bit strings into a single numpy array of bits
-        all_bits = np.array(list("".join(bit_strings)), dtype=int)
-
-        return all_bits.astype(bool)
+        return bits_reshaped.flatten()
 
     def forward(self, symbols: Signal) -> np.ndarray:
-        """
-        对接收到的符号进行判决并解映射。
+        """将复符号信号解映射为比特流。
 
         Parameters
         ----------
         symbols : Signal
-            接收到的符号信号。
-            如果为单载波，数据形状为 (n_pol, N_symbols)。
-            如果为 OFDM，数据形状为 (n_pol, N_subcarriers, N_symbols)。
+            接收到的复符号 Signal 对象
 
         Returns
         -------
         np.ndarray
-            判决后的比特流。
+            恢复的比特流 (bool 数组)
         """
-        if symbols.data.ndim == 3:  # OFDM
-            # Flatten OFDM symbols to (n_pol, N_total_symbols) for demapping
+        if symbols.data.ndim == 3:  # OFDM 等多载波架构支持
             flat_symbols = symbols.data.reshape(symbols.ctx.n_pol, -1)
-        elif symbols.data.ndim == 2:  # Single-carrier
+        elif symbols.data.ndim == 2:
             flat_symbols = symbols.data
         else:
-            raise ValueError("Unsupported symbol data dimension for demapper.")
+            raise ValueError("Unsupported symbol data dimension.")
 
-        all_demapped_bits: list[np.ndarray] = []
-
-        for pol_idx in range(self.n_pol):
-            pol_symbols = flat_symbols[pol_idx, :]
-            demapped_bits = self._demap_symbols_to_bits(pol_symbols)
-            all_demapped_bits.append(demapped_bits)
-
-        # Concatenate bits from all polarizations (X, then Y)
-        # This assumes TX Mapper also concatenates X bits then Y bits
-        final_bits = np.concatenate(all_demapped_bits)
-
-        return final_bits
+        if self.n_pol == 1:
+            return self._demap_symbols_to_bits(flat_symbols[0])
+        else:
+            bits_x = self._demap_symbols_to_bits(flat_symbols[0])
+            bits_y = self._demap_symbols_to_bits(flat_symbols[1])
+            # 与 Mapper 分发方式对应 (交织)
+            final_bits = np.empty(len(bits_x) + len(bits_y), dtype=bool)
+            final_bits[0::2] = bits_x
+            final_bits[1::2] = bits_y
+            return final_bits
 
 
 class BERCalculator:

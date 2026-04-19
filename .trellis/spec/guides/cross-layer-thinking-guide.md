@@ -7,6 +7,7 @@
 ## Purpose
 
 Physical layer simulation involves multiple processing stages. This guide helps you think through:
+
 - How data flows between stages
 - Where transformations happen
 - What state needs to be preserved
@@ -17,26 +18,31 @@ Physical layer simulation involves multiple processing stages. This guide helps 
 ## Layers in Physics Simulation
 
 ### 1. Signal Representation Layer
+
 - `physics/signal.py` - Base signal representation
 - What: Optical field, power, phase information
 - Key types: Complex-valued arrays for I/Q components
 
 ### 2. Transmitter Layer
+
 - `physics/tx/` - Modulation, pulse shaping, upconversion
 - Input: Bit stream
 - Output: Baseband complex signal
 
 ### 3. Channel Layer
+
 - `physics/channel/` - Fiber propagation, amplification
 - Input: Transmitted signal
 - Output: Distorted signal (ASE, NLI, dispersion)
 
 ### 4. DSP Layer
+
 - `physics/dsp/` - Equalization, carrier recovery
 - Input: Received signal (after ADC)
 - Output: Equalized symbols
 
 ### 5. Metrics Layer
+
 - `physics/metrics/` - BER, EVM computation
 - Input: Processed symbols
 - Output: Performance metrics
@@ -46,6 +52,7 @@ Physical layer simulation involves multiple processing stages. This guide helps 
 ## Thinking Triggers
 
 Apply this guide when:
+
 - [ ] Feature touches 3+ layers (tx, channel, dsp, metrics)
 - [ ] Data format changes between layers (e.g., real to complex)
 - [ ] Multiple consumers need the same intermediate result
@@ -74,6 +81,7 @@ Demod: BER/EVM Calculation
 ### Step 2: Identify Interfaces
 
 For each boundary, define:
+
 - Data format (complex array, real array?)
 - Dimensions (samples, symbols, channels?)
 - Assumptions (power normalization?)
@@ -104,6 +112,7 @@ For each boundary, define:
 ## Good Patterns
 
 ### Pipeline Pattern
+
 ```python
 class ProcessingPipeline:
     def __init__(self):
@@ -119,6 +128,7 @@ class ProcessingPipeline:
 ```
 
 ### Configuration Objects
+
 ```python
 class ChannelConfig(BaseModel):
     fiber_length_km: float

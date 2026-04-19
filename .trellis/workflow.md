@@ -149,6 +149,7 @@ tasks/
 ## Summary
 
 Following this workflow ensures:
+
 - Continuity across multiple sessions
 - Consistent code quality
 - Trackable progress

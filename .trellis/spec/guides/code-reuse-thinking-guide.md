@@ -34,6 +34,7 @@ grep -r "similar_function_name" src/
 ### Step 2: Identify the Pattern
 
 Ask yourself:
+
 - Is this a new pattern or an existing one?
 - Can the existing code be generalized?
 - Should this be a parameter rather than duplication?

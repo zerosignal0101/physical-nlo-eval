@@ -2,9 +2,9 @@
 
 ## Active Developers
 
-| Developer | Status | Last Session |
-|-----------|--------|--------------|
-| zerosignal | Active | Today |
+| Developer  | Status | Last Session |
+| ---------- | ------ | ------------ |
+| zerosignal | Active | Today        |
 
 ## Session Journals
 
