@@ -425,7 +425,7 @@ class ChromaticDispersionComp(BaseBlock):
         # CD Compensation Filter in frequency domain
         # H(omega) = exp(j * beta2 * L * omega^2 / 2)
         # Note: beta2 is usually in s^2/m, length in m.
-        # beta2_si = self.beta2_ps2_per_m * 1e-24  # ps^2/km to s^2/m
+        # beta2_si = self.beta2_ps2_per_km * 1e-24  # ps^2/km to s^2/m
         # length_si = length_to_compensate_km * 1000  # km to m
         # dispersion_term = beta2_si * length_si / 2
 

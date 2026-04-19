@@ -28,16 +28,16 @@ class FiberChannel(BaseBlock):
         光纤总长度 (米)。
     alpha_db_per_km : float | np.ndarray
         光纤损耗 (dB/km)。支持标量或数组 (沿光纤长度变化)。
-    beta2_ps2_per_m : float
+    beta2_ps2_per_km : float
         二阶色散系数 (ps^2/km)。
-    beta3_ps3_per_m : float
+    beta3_ps3_per_km : float
         三阶色散系数 (ps^3/km)。
     v_comoving : float | None, optional
         共速参考频率 (Hz)。为 None 时使用频率网格中心频率。
     d_pmd_ps_per_sqrt_km : float, optional
         PMD 系数 (ps/sqrt(km))。如果为 0，则不模拟 PMD。
-    step_size_m : float, optional
-        PyNLO 求解器的步长 (米)。
+    coarse_step_size_m : float, optional
+        PyNLO 粗步长 (米)。
     n2_si : float, optional
         光纤非线性折射率 n2 (m^2/W)。如果 gamma 已给出，则此参数可忽略。
     a_eff_um2 : float, optional
@@ -54,11 +54,11 @@ class FiberChannel(BaseBlock):
         self,
         length_m: float,
         alpha_db_per_km: float | np.ndarray,
-        beta2_ps2_per_m: float,
-        beta3_ps3_per_m: float,
+        beta2_ps2_per_km: float,
+        beta3_ps3_per_km: float,
         v_comoving: float | None = None,
         d_pmd_ps_per_sqrt_km: float = 0.0,
-        step_size_m: float = 1000.0,
+        coarse_step_size_m: float = 1000.0,
         n2_si: float = 2.6e-20,  # Fused silica typical n2
         a_eff_um2: float = 80.0,  # SMF typical A_eff
         slope_a_eff_um2_per_nm: float = 0.05,  # SMF typical A_eff
@@ -70,16 +70,16 @@ class FiberChannel(BaseBlock):
         super().__init__(name="FiberChannel")
         if not length_m > 0:
             raise ValueError("Fiber length must be positive.")
-        if not step_size_m > 0:
+        if not coarse_step_size_m > 0:
             raise ValueError("Step size must be positive.")
 
         self.length_m = length_m
         self.alpha_db_per_km = alpha_db_per_km
-        self.beta2_ps2_per_m = beta2_ps2_per_m
-        self.beta3_ps3_per_m = beta3_ps3_per_m
+        self.beta2_ps2_per_km = beta2_ps2_per_km
+        self.beta3_ps3_per_km = beta3_ps3_per_km
         self.v_comoving = v_comoving
         self.d_pmd_ps_per_sqrt_km = d_pmd_ps_per_sqrt_km
-        self.step_size_m = step_size_m
+        self.coarse_step_size_m = coarse_step_size_m
         self.n2_si = n2_si
         self.a_eff_um2 = a_eff_um2
         self.slope_a_eff_um2_per_nm = slope_a_eff_um2_per_nm
@@ -94,16 +94,18 @@ class FiberChannel(BaseBlock):
 
         # 将单位转换为 SI 标准以匹配 PyNLO
         self.alpha_np_inv_m = self.alpha_db_per_km * 1e-3 * np.log(10) / 10  # dB/km to Np/m
-        self.beta2_si = self.beta2_ps2_per_m * 1e-24  # ps^2/m to s^2/m
-        self.beta3_si = self.beta3_ps3_per_m * 1e-36  # ps^3/m to s^3/m
+        self.beta2_si = self.beta2_ps2_per_km * 1e-27  # ps^2/km to s^2/m
+        self.beta3_si = self.beta3_ps3_per_km * 1e-39  # ps^3/km to s^3/m
         self.a_eff_si = self.a_eff_um2 * 1e-12  # μm^2 to m^2
         self.slope_a_eff_si = self.slope_a_eff_um2_per_nm * 1e-3  # μm^2/nm to dimensionless
         self.ref_lambda_si = self.ref_lambda_nm * 1e-9  # nm to m
 
-        # PMD (使用 2km 固定值)，确保 z_grid 至少有两个点
-        n_z_points = max(2, int(self.length_m / 2000.0))
+        # PMD (使用 coarse_step_size_m 作为粗步长大小)，确保 z_grid 至少有两个点
+        n_z_points = max(2, int(self.length_m / self.coarse_step_size_m))
         self.z_grid = np.linspace(0, self.length_m, n_z_points)
-        self.delta_tau_si = self.d_pmd_ps_per_sqrt_km * self.compute_ctx.array.sqrt(2000.0 / 1e3) * 1e-12  # s
+        self.delta_tau_si = (
+            self.d_pmd_ps_per_sqrt_km * self.compute_ctx.array.sqrt(self.coarse_step_size_m / 1e3) * 1e-12
+        )  # s
 
     def _setup_pynlo_environment(self, signal: Signal) -> tuple[Any, Any, Any]:
         """根据输入信号设置 PyNLO 的 Grid 和 ManakovEquation。"""
@@ -145,7 +147,10 @@ class FiberChannel(BaseBlock):
             ctx=self.compute_ctx,
         )
 
-        initial_state = FieldState(grid=grid, a_v=signal.data, n_comp=signal.ctx.n_pol)
+        data_a_v = signal.data
+        if signal.ctx.n_pol == 1:
+            data_a_v = self.compute_ctx.array.stack([signal.data[0], np.zeros_like(signal.data[0])])
+        initial_state = FieldState(grid=grid, a_v=data_a_v, n_comp=2)
 
         return grid, equation, initial_state
 
@@ -239,7 +244,7 @@ class FiberChannel(BaseBlock):
         new_ctx = SignalContext(
             sample_rate=opt_signal.ctx.sample_rate,
             center_freq=opt_signal.ctx.center_freq,
-            n_pol=opt_signal.ctx.n_pol,
+            n_pol=2,  # Manakov 方程输出为 X Y 偏振
             sps=opt_signal.ctx.sps,
             sym_rate=opt_signal.ctx.sym_rate,
             bits_per_symbol=opt_signal.ctx.bits_per_symbol,
@@ -248,8 +253,8 @@ class FiberChannel(BaseBlock):
                 **(opt_signal.ctx.meta or {}),
                 "fiber_length_m": self.length_m,
                 "fiber_alpha_db_per_km": self.alpha_db_per_km,
-                "fiber_beta2_ps2_per_m": self.beta2_ps2_per_m,
-                "fiber_beta3_ps3_per_m": self.beta3_ps3_per_m,
+                "fiber_beta2_ps2_per_m": self.beta2_ps2_per_km,
+                "fiber_beta3_ps3_per_m": self.beta3_ps3_per_km,
                 "fiber_d_pmd_ps_per_sqrt_km": self.d_pmd_ps_per_sqrt_km,
                 "fiber_a_eff_um2": self.a_eff_um2,
                 "fiber_slope_a_eff_um2_per_nm": self.slope_a_eff_um2_per_nm,
