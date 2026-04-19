@@ -90,8 +90,8 @@ def test_mapper_demapper_roundtrip(modulation: str, num_symbols: int = 10000, se
     print(f"  Round-trip 测试: {modulation}")
     print(f"  {'=' * 50}")
 
-    mapper = Mapper(modulation=modulation, power_norm=True, diff_coding=False)
-    demapper = Demapper(modulation=modulation, power_norm=True, diff_coding=False)
+    mapper = Mapper(modulation=modulation, power_norm=True)
+    demapper = Demapper(modulation=modulation, power_norm=True)
 
     # 计算需要的比特数
     bits_per_symbol = mapper.bits_per_symbol
@@ -185,8 +185,8 @@ def test_awgn_ber_theoretical(modulation: str, eb_n0_db: float, min_errors: int 
     """
     np.random.seed(seed)
 
-    mapper = Mapper(modulation=modulation, power_norm=True, diff_coding=False)
-    demapper = Demapper(modulation=modulation, power_norm=True, diff_coding=False)
+    mapper = Mapper(modulation=modulation, power_norm=True)
+    demapper = Demapper(modulation=modulation, power_norm=True)
 
     bits_per_symbol = mapper.bits_per_symbol
     n_pol = mapper.n_pol
@@ -430,6 +430,80 @@ def test_diff_coding():
 
 
 # ============================================================================
+# 导频插入/剔除测试
+# ============================================================================
+
+
+def test_pilot_framing():
+    """测试导频周期性插入与剔除的 round-trip 正确性."""
+    print("\n" + "=" * 60)
+    print("测试 6: 导频插入/剔除")
+    print("=" * 60)
+
+    np.random.seed(123)
+
+    # 导频配置：每 100 个净荷符号插入 2 个导频符号
+    pilot_symbols = np.array([1 + 1j, -1 - 1j])
+    pilot_info = {"symbols": pilot_symbols, "period": 100}
+
+    modulations = ["SP-QPSK", "SP-16QAM", "DP-16QAM"]
+
+    for mod in modulations:
+        mapper = Mapper(modulation=mod, power_norm=True, pilot_info=pilot_info)
+        demapper = Demapper(modulation=mod, power_norm=True, pilot_info=pilot_info)
+
+        bits_per_symbol = mapper.bits_per_symbol
+        n_pol = mapper.n_pol
+        num_symbols = 5000
+        total_bits = num_symbols * bits_per_symbol * n_pol
+
+        tx_bits = np.random.randint(0, 2, size=total_bits, dtype=bool)
+
+        # 映射（插入导频）
+        signal = mapper.forward(tx_bits)
+
+        # 验证帧结构中确实插入了导频
+        assert signal.ctx.meta.get("pilot_info") is pilot_info
+
+        if n_pol == 1:
+            n_expected = num_symbols + 2 * int(np.ceil(num_symbols / 100))
+            assert signal.data.shape[1] == n_expected, f"{mod}: SP 帧长度 {signal.data.shape[1]} != 期望 {n_expected}"
+        else:
+            n_expected = num_symbols + 2 * int(np.ceil(num_symbols / 100))
+            assert signal.data.shape[1] == n_expected, f"{mod}: DP 帧长度 {signal.data.shape[1]} != 期望 {n_expected}"
+
+        # 解映射（剔除导频）
+        rx_bits = demapper.forward(signal)
+
+        bit_errors = np.sum(tx_bits != rx_bits)
+        print(f"  {mod}: 比特错误数 = {bit_errors} / {total_bits}")
+
+        assert bit_errors == 0, f"{mod} 导频 round-trip 失败: {bit_errors} 错误"
+        print(f"  [PASS] {mod}")
+
+    # 额外测试：验证 demapper 能从 signal.ctx.meta 读取 pilot_info
+    # 即便 demapper 构造时不传 pilot_info，也应正确解帧
+    print("\n  上下文透传测试...")
+    mapper2 = Mapper(modulation="SP-16QAM", power_norm=True, pilot_info=pilot_info)
+    demapper2 = Demapper(modulation="SP-16QAM", power_norm=True)  # 不传 pilot_info
+
+    bits_per_symbol = mapper2.bits_per_symbol
+    num_symbols = 1000
+    total_bits = num_symbols * bits_per_symbol
+    tx_bits = np.random.randint(0, 2, size=total_bits, dtype=bool)
+
+    signal2 = mapper2.forward(tx_bits)
+    rx_bits2 = demapper2.forward(signal2)  # 应自动从 signal.ctx.meta 读取 pilot_info
+
+    bit_errors2 = np.sum(tx_bits != rx_bits2)
+    print(f"  SP-16QAM (ctx透传): 比特错误数 = {bit_errors2} / {total_bits}")
+    assert bit_errors2 == 0, f"导频 ctx 透传测试失败: {bit_errors2} 错误"
+    print("  [PASS] 上下文透传")
+
+    print("\n[PASS] 导频插入/剔除测试通过")
+
+
+# ============================================================================
 # 运行所有测试
 # ============================================================================
 
@@ -446,6 +520,7 @@ def run_all_tests():
         test_evm_no_noise()
         test_evm_with_awgn()
         test_diff_coding()
+        test_pilot_framing()
 
         print("\n" + "=" * 60)
         print("所有测试完成!")

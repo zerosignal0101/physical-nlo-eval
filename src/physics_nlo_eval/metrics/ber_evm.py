@@ -1,99 +1,67 @@
 """判决和 BER/EVM 计算所需的解映射模块。"""
 
-import re
-
 import numpy as np
 
 from physics_nlo_eval.core.base import BaseBlock
 from physics_nlo_eval.core.signal import Signal
-
-# 复用 Mapper 中的格雷逆转换
-from physics_nlo_eval.tx.mapper import _gray_to_binary
+from physics_nlo_eval.tx.mapper import Constellation
 
 
 class Demapper(BaseBlock):
-    """符号到比特的解映射模块。
-
-    将接收到的符号判决到最近的理想星座点，解映射并恢复原始比特流。
-
-    Parameters
-    ----------
-    modulation : str
-        调制格式。
-    power_norm : bool, optional
-        星座图是否进行了功率归一化。
-    diff_coding : bool, optional
-        是否启用象限差分解码。
-    prob_shaping : dict[str, float] | None, optional
-        概率整形参数，须与 Mapper 保持一致。
-    """
+    """符号到比特的解映射模块，支持导频剔除和差分解码。"""
 
     def __init__(
         self,
         modulation: str = "DP-16QAM",
         power_norm: bool = True,
-        diff_coding: bool = False,
         prob_shaping: dict[str, float] | None = None,
+        pilot_info: dict | None = None,
+        diff_coding: bool = False,
     ) -> None:
         super().__init__(name=f"Demapper({modulation})")
-        self.modulation = modulation.upper()
-        self.power_norm = power_norm
+        # 共享 Constellation 类，消除重复代码
+        self.constellation = Constellation(modulation, power_norm, prob_shaping)
+        self.pilot_info = pilot_info
         self.diff_coding = diff_coding
-        self.prob_shaping = prob_shaping
 
-        self.n_pol: int
-        self.m_ary: int
-        self.bits_per_symbol: int
-        self.lut: np.ndarray
+    @property
+    def bits_per_symbol(self) -> int:
+        """每个符号的比特数。"""
+        return self.constellation.bits_per_symbol
 
-        self._parse_modulation()
-        self._generate_constellation_and_lut()
+    @property
+    def n_pol(self) -> int:
+        """偏振数 (1=单偏振, 2=双偏振)。"""
+        return self.constellation.n_pol
 
-    def _parse_modulation(self) -> None:
-        """解析调制格式 (逻辑与 Mapper 相同)"""
-        match = re.match(r"^(DP|SP)-(OOK|BPSK|QPSK|(\d+)QAM)$", self.modulation)
-        if not match:
-            raise ValueError(f"Invalid modulation string: {self.modulation}.")
+    def _extract_payload(self, framed_signal: np.ndarray, pilot_info: dict) -> np.ndarray:
+        """从接收信号中剔除导频，提取纯净的净荷符号。"""
+        period = pilot_info["period"]
+        p_len = len(np.atleast_1d(pilot_info["symbols"]))
 
-        pol_type, mod_type, qam_m = match.groups()
-        self.n_pol = 2 if pol_type == "DP" else 1
-        self.m_ary = 2 if mod_type in ["OOK", "BPSK"] else (4 if mod_type == "QPSK" else int(qam_m))
-        self.bits_per_symbol = int(np.log2(self.m_ary))
+        block_size = p_len + period
+        n_total = len(framed_signal)
+        n_blocks = int(np.ceil(n_total / block_size))
 
-    def _generate_constellation_and_lut(self) -> None:
-        """生成接收端参考星座图。"""
-        # (生成逻辑同 Mapper，为避免重复代码，在实际框架中这部分应提取为基类或 utils)
-        if self.modulation.endswith("OOK"):
-            constellation = np.array([0.0, 1.0], dtype=np.complex128)
-        elif self.modulation.endswith("BPSK"):
-            constellation = np.array([-1.0, 1.0], dtype=np.complex128)
-        else:
-            sqrt_m = int(np.sqrt(self.m_ary))
-            idx = np.arange(sqrt_m)
-            bin_val = _gray_to_binary(idx)
-            pam_levels = 2 * bin_val - (sqrt_m - 1)
-            i_grid, q_grid = np.meshgrid(pam_levels, pam_levels, indexing="ij")
-            constellation = (i_grid + 1j * q_grid).flatten()
+        payload_chunks = []
+        for i in range(n_blocks):
+            start_idx = i * block_size
+            # 跳过前导 p_len 个导频符号
+            payload_start = start_idx + p_len
+            payload_end = min(start_idx + block_size, n_total)
 
-        if self.prob_shaping and "nu" in self.prob_shaping:
-            nu = self.prob_shaping["nu"]
-            probs = np.exp(-nu * (np.abs(constellation) ** 2))
-            probs /= np.sum(probs)
-        else:
-            probs = np.ones(self.m_ary) / self.m_ary
+            if payload_start < payload_end:
+                payload_chunks.append(framed_signal[payload_start:payload_end])
 
-        if self.power_norm:
-            constellation /= np.sqrt(np.sum(probs * (np.abs(constellation) ** 2)))
-
-        self.lut = constellation
+        return np.concatenate(payload_chunks)
 
     def _diff_decode(self, symbol_indices: np.ndarray) -> np.ndarray:
         """基于象限的差分解码。"""
-        if self.m_ary < 4:
+        if self.constellation.m_ary < 4:
             return symbol_indices
 
-        k_per_dim = self.bits_per_symbol // 2
-        i_sign_bit = (symbol_indices >> (self.bits_per_symbol - 1)) & 1
+        k_per_dim = self.constellation.bits_per_symbol // 2
+        i_sign_bit = (symbol_indices >> (self.constellation.bits_per_symbol - 1)) & 1
         q_sign_bit = (symbol_indices >> (k_per_dim - 1)) & 1
 
         quad_bits = (i_sign_bit << 1) | q_sign_bit
@@ -103,59 +71,57 @@ class Demapper(BaseBlock):
         decoded_quad[0] = quad_bits[0]  # 第一位参考
         decoded_quad[1:] = (quad_bits[1:] - quad_bits[:-1]) % 4
 
-        mask = ~((1 << (self.bits_per_symbol - 1)) | (1 << (k_per_dim - 1)))
+        mask = ~((1 << (self.constellation.bits_per_symbol - 1)) | (1 << (k_per_dim - 1)))
         new_indices = (
             (symbol_indices & mask)
-            | ((decoded_quad >> 1) << (self.bits_per_symbol - 1))
+            | ((decoded_quad >> 1) << (self.constellation.bits_per_symbol - 1))
             | ((decoded_quad & 1) << (k_per_dim - 1))
         )
         return new_indices
 
-    def _demap_symbols_to_bits(self, symbols: np.ndarray) -> np.ndarray:
-        """极速解映射：欧式距离判决 + 向量化位运算解包。"""
-        # 广播计算欧式距离 (N_sym, M_ary)
-        # 如果 symbols 非常大，可使用分块 (chunking) 避免 OOM，但通常足够
-        distances = np.abs(symbols[:, np.newaxis] - self.lut[np.newaxis, :])
+    def _demap_payload(self, payload_symbols: np.ndarray) -> np.ndarray:
+        """极速解映射：判决 + 向量化位运算解包。"""
+        cst = self.constellation
+
+        # 欧氏距离判决
+        distances = np.abs(payload_symbols[:, np.newaxis] - cst.lut[np.newaxis, :])
         decision_indices = np.argmin(distances, axis=1)
 
         if self.diff_coding:
             decision_indices = self._diff_decode(decision_indices)
 
-        # 向量化整数到比特重组 (比原版字符串拼接快数百倍)
-        powers_of_two = 1 << np.arange(self.bits_per_symbol - 1, -1, -1)
+        # 向量化整数到比特重组
+        powers_of_two = 1 << np.arange(cst.bits_per_symbol - 1, -1, -1)
         bits_reshaped = (decision_indices[:, np.newaxis] & powers_of_two) > 0
 
         return bits_reshaped.flatten()
 
     def forward(self, symbols: Signal) -> np.ndarray:
-        """将复符号信号解映射为比特流。
+        """将复符号信号解映射为比特流，支持导频剔除。"""
+        # 优先使用 Signal 流自带的导频元信息（如果存在）
+        active_pilot_info = symbols.ctx.meta.get("pilot_info", self.pilot_info)
 
-        Parameters
-        ----------
-        symbols : Signal
-            接收到的复符号 Signal 对象
+        flat_symbols = symbols.data.reshape(symbols.ctx.n_pol, -1) if symbols.data.ndim == 3 else symbols.data
 
-        Returns
-        -------
-        np.ndarray
-            恢复的比特流 (bool 数组)
-        """
-        if symbols.data.ndim == 3:  # OFDM 等多载波架构支持
-            flat_symbols = symbols.data.reshape(symbols.ctx.n_pol, -1)
-        elif symbols.data.ndim == 2:
-            flat_symbols = symbols.data
+        all_bits = []
+        for pol_idx in range(self.constellation.n_pol):
+            pol_symbols = flat_symbols[pol_idx]
+
+            # 1. 剔除导频
+            if active_pilot_info:
+                pol_symbols = self._extract_payload(pol_symbols, active_pilot_info)
+
+            # 2. 解映射
+            bits = self._demap_payload(pol_symbols)
+            all_bits.append(bits)
+
+        if self.constellation.n_pol == 1:
+            return all_bits[0]
         else:
-            raise ValueError("Unsupported symbol data dimension.")
-
-        if self.n_pol == 1:
-            return self._demap_symbols_to_bits(flat_symbols[0])
-        else:
-            bits_x = self._demap_symbols_to_bits(flat_symbols[0])
-            bits_y = self._demap_symbols_to_bits(flat_symbols[1])
-            # 与 Mapper 分发方式对应 (交织)
-            final_bits = np.empty(len(bits_x) + len(bits_y), dtype=bool)
-            final_bits[0::2] = bits_x
-            final_bits[1::2] = bits_y
+            # 恢复双偏振的交织逻辑
+            final_bits = np.empty(len(all_bits[0]) + len(all_bits[1]), dtype=bool)
+            final_bits[0::2] = all_bits[0]
+            final_bits[1::2] = all_bits[1]
             return final_bits
 
 
