@@ -82,7 +82,7 @@ def add_awgn(symbols: np.ndarray, eb_n0_db: float, bits_per_symbol: int) -> np.n
 # ============================================================================
 
 
-def test_mapper_demapper_roundtrip(modulation: str, num_symbols: int = 10000, seed: int = 42):
+def _test_mapper_demapper_roundtrip(modulation: str, num_symbols: int = 10000, seed: int = 42):
     """测试 Mapper -> Demapper 的 round-trip 正确性 (无噪声)."""
     np.random.seed(seed)
 
@@ -150,7 +150,7 @@ def test_all_modulations_roundtrip():
 
     for mod in modulations:
         try:
-            test_mapper_demapper_roundtrip(mod)
+            _test_mapper_demapper_roundtrip(mod)
         except Exception as e:
             print(f"  [FAIL] {mod}: {e}")
             raise
@@ -161,7 +161,7 @@ def test_all_modulations_roundtrip():
 # ============================================================================
 
 
-def test_awgn_ber_theoretical(modulation: str, eb_n0_db: float, min_errors: int = 500, seed: int = 42):
+def _test_awgn_ber_theoretical(modulation: str, eb_n0_db: float, min_errors: int = 500, seed: int = 42):
     """测试 AWGN 信道下 BER 与理论值的对比.
 
     采用错误停止门限: 累积达到 min_errors 个比特错误后停止，
@@ -274,7 +274,7 @@ def test_awgn_ber_validation():
     all_passed = True
     for mod, eb_n0, tol_factor in test_cases:
         try:
-            measured_ber, theoretical_ber, num_syms, num_errors = test_awgn_ber_theoretical(mod, eb_n0, min_errors=500)
+            measured_ber, theoretical_ber, num_syms, num_errors = _test_awgn_ber_theoretical(mod, eb_n0, min_errors=500)
 
             ratio = measured_ber / theoretical_ber if theoretical_ber > 0 else float("inf")
 
@@ -306,8 +306,6 @@ def test_awgn_ber_validation():
         print("[PASS] 所有 AWGN BER 测试通过")
     else:
         print("[WARN] 部分 AWGN BER 测试未通过理论范围 (可能需要更多采样)")
-
-    return all_passed
 
 
 # ============================================================================
