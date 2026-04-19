@@ -8,7 +8,7 @@ import numpy as np
 from pynlo.backends import get_numpy_context
 
 # PyNLO imports
-from pynlo.physics.field import FieldState, create_gaussian, create_sech
+from pynlo.physics.field import create_gaussian, create_sech
 from scipy.constants import c
 
 # FiberChannel under test
@@ -52,7 +52,10 @@ def test_fiber_channel_basic():
         t_fwhm=pulse_fwhm,
         ctx=ctx,
     )
-    combined_data = np.vstack([pulse_x.a_v_monotonic, pulse_y.a_v_monotonic])
+    # FiberChannel expects time-domain input
+    pulse_x_t = pulse_x.to_time(ctx)
+    pulse_y_t = pulse_y.to_time(ctx)
+    combined_data = np.vstack([pulse_x_t[0], pulse_y_t[0]])
 
     print(f"脉冲能量 (单偏振): {pulse_x.energy:.6e} J")
 
@@ -89,8 +92,8 @@ def test_fiber_channel_basic():
 
     # 检查输出
     assert output.data.shape[0] == 2, "输出应为双偏振"
-    output_state = FieldState(grid=pulse_x.grid, a_v=output.data, n_comp=2)
-    output_energy = output_state.energy
+    # Compute energy directly from time-domain output using the grid's dt
+    output_energy = np.sum(np.abs(output.data) ** 2) * pulse_x.grid.dt
 
     print(f"\n输出脉冲能量: {output_energy:.6e} J")
 
@@ -154,7 +157,10 @@ def test_fiber_channel_power_attenuation():
         t_fwhm=pulse_fwhm,
         ctx=ctx,
     )
-    combined_data = np.vstack([pulse_x.a_v_monotonic, pulse_y.a_v_monotonic])
+    # FiberChannel expects time-domain input
+    pulse_x_t = pulse_x.to_time(ctx)
+    pulse_y_t = pulse_y.to_time(ctx)
+    combined_data = np.vstack([pulse_x_t[0], pulse_y_t[0]])
 
     signal_ctx = SignalContext(
         sample_rate=bandwidth,
@@ -187,11 +193,10 @@ def test_fiber_channel_power_attenuation():
         )
 
         output = fiber.forward(signal)
-        output_state = FieldState(grid=pulse_x.grid, a_v=output.data, n_comp=2)
 
         expected_linear_loss = 10 ** (-alpha_db * length / 1e3 / 10)
         expected_out_energy = total_input_energy * expected_linear_loss
-        actual_out_energy = output_state.energy
+        actual_out_energy = np.sum(np.abs(output.data) ** 2) * pulse_x.grid.dt
 
         measured_loss_db = -10 * np.log10(actual_out_energy / total_input_energy)
         expected_loss_db = alpha_db * length / 1e3
@@ -256,7 +261,10 @@ def test_fiber_channel_chromatic_dispersion():
         t_fwhm=pulse_fwhm,
         ctx=ctx,
     )
-    combined_data = np.vstack([pulse_x.a_v_monotonic, pulse_y.a_v_monotonic])
+    # FiberChannel expects time-domain input
+    pulse_x_t = pulse_x.to_time(ctx)
+    pulse_y_t = pulse_y.to_time(ctx)
+    combined_data = np.vstack([pulse_x_t[0], pulse_y_t[0]])
 
     # 转换为时间域
     pulse_t = pulse_x.to_time(ctx)
@@ -288,9 +296,8 @@ def test_fiber_channel_chromatic_dispersion():
 
     output = fiber.forward(signal)
 
-    # 分析脉冲宽度变化
-    output_state = FieldState(grid=pulse_x.grid, a_v=output.data, n_comp=2)
-    output_t = output_state.to_time(ctx)
+    # 分析脉冲宽度变化 - output.data is already time-domain from FiberChannel
+    output_t = output.data
 
     # 计算 FWHM
     def calculate_fwhm(time_grid, power):
@@ -309,7 +316,7 @@ def test_fiber_channel_chromatic_dispersion():
     output_power = np.abs(output_t[0]) ** 2
 
     initial_fwhm = calculate_fwhm(pulse_x.grid.t_grid, initial_power)
-    output_fwhm = calculate_fwhm(output_state.grid.t_grid, output_power)
+    output_fwhm = calculate_fwhm(pulse_x.grid.t_grid, output_power)
 
     print("\n脉冲宽度分析:")
     print(f"  初始 FWHM: {initial_fwhm * 1e12:.3f} ps")
@@ -375,8 +382,10 @@ def test_fiber_channel_pmd():
         ctx=ctx,
     )
 
-    # 合并为双偏振信号
-    combined_data = np.vstack([pulse_x.a_v_monotonic, pulse_y.a_v_monotonic])
+    # FiberChannel expects time-domain input
+    pulse_x_t = pulse_x.to_time(ctx)
+    pulse_y_t = pulse_y.to_time(ctx)
+    combined_data = np.vstack([pulse_x_t[0], pulse_y_t[0]])
 
     signal_ctx = SignalContext(
         sample_rate=bandwidth,
@@ -401,22 +410,20 @@ def test_fiber_channel_pmd():
         coarse_step_size_m=500.0,
     )
 
-    initial_state = FieldState(grid=pulse_x.grid, a_v=combined_data, n_comp=2)
-    print(f"\n初始状态 - X极化能量: {np.sum(np.abs(initial_state.a_v[0]) ** 2) * pulse_x.grid.dv:.6e} J")
-    print(f"           Y极化能量: {np.sum(np.abs(initial_state.a_v[1]) ** 2) * pulse_x.grid.dv:.6e} J")
+    # Compute initial energy directly from time-domain combined_data
+    total_energy_in = np.sum(np.abs(combined_data) ** 2) * pulse_x.grid.dt
+    print(f"\n初始状态 - X极化能量: {np.sum(np.abs(combined_data[0]) ** 2) * pulse_x.grid.dt:.6e} J")
+    print(f"           Y极化能量: {np.sum(np.abs(combined_data[1]) ** 2) * pulse_x.grid.dt:.6e} J")
 
     output = fiber.forward(signal)
 
     # 检查输出是双偏振
     assert output.data.shape[0] == 2, "输出应为双偏振"
 
-    output_state = FieldState(grid=pulse_x.grid, a_v=output.data, n_comp=2)
-    print(f"\n输出状态 - X极化能量: {np.sum(np.abs(output_state.a_v[0]) ** 2) * pulse_x.grid.dv:.6e} J")
-    print(f"           Y极化能量: {np.sum(np.abs(output_state.a_v[1]) ** 2) * pulse_x.grid.dv:.6e} J")
-
-    # 检查能量守恒 (忽略损耗)
-    total_energy_in = np.sum(np.abs(initial_state.a_v) ** 2) * pulse_x.grid.dv
-    total_energy_out = np.sum(np.abs(output_state.a_v) ** 2) * pulse_x.grid.dv
+    # Compute output energy directly from time-domain output.data
+    total_energy_out = np.sum(np.abs(output.data) ** 2) * pulse_x.grid.dt
+    print(f"\n输出状态 - X极化能量: {np.sum(np.abs(output.data[0]) ** 2) * pulse_x.grid.dt:.6e} J")
+    print(f"           Y极化能量: {np.sum(np.abs(output.data[1]) ** 2) * pulse_x.grid.dt:.6e} J")
 
     print(f"\n总能量: 输入={total_energy_in:.6e} J, 输出={total_energy_out:.6e} J")
     print(f"能量比: {total_energy_out / total_energy_in:.4f}")
@@ -462,7 +469,10 @@ def test_fiber_channel_sech_pulse():
         t_fwhm=pulse_fwhm,
         ctx=ctx,
     )
-    combined_data = np.vstack([pulse_x.a_v_monotonic, pulse_y.a_v_monotonic])
+    # FiberChannel expects time-domain input
+    pulse_x_t = pulse_x.to_time(ctx)
+    pulse_y_t = pulse_y.to_time(ctx)
+    combined_data = np.vstack([pulse_x_t[0], pulse_y_t[0]])
 
     print(f"脉冲能量 (单偏振): {pulse_x.energy:.6e} J")
 
@@ -485,13 +495,15 @@ def test_fiber_channel_sech_pulse():
     )
 
     output = fiber.forward(signal)
-    output_state = FieldState(grid=pulse_x.grid, a_v=output.data, n_comp=2)
 
-    print(f"输出能量: {output_state.energy:.6e} J")
+    # Compute output energy directly from time-domain output.data
+    output_energy = np.sum(np.abs(output.data) ** 2) * pulse_x.grid.dt
+
+    print(f"输出能量: {output_energy:.6e} J")
 
     # 检查数值稳定性
-    assert np.isfinite(output_state.energy), "Sech 脉冲传播应保持数值稳定"
-    assert output_state.energy > 0, "输出能量应为正"
+    assert np.isfinite(output_energy), "Sech 脉冲传播应保持数值稳定"
+    assert output_energy > 0, "输出能量应为正"
 
     print("\n[PASS] Sech 脉冲测试通过")
 
@@ -529,7 +541,10 @@ def test_fiber_channel_no_nan_inf():
         t_fwhm=pulse_fwhm,
         ctx=ctx,
     )
-    combined_data = np.vstack([pulse_x.a_v_monotonic, pulse_y.a_v_monotonic])
+    # FiberChannel expects time-domain input
+    pulse_x_t = pulse_x.to_time(ctx)
+    pulse_y_t = pulse_y.to_time(ctx)
+    combined_data = np.vstack([pulse_x_t[0], pulse_y_t[0]])
 
     signal_ctx = SignalContext(
         sample_rate=bandwidth,
@@ -657,9 +672,8 @@ def test_fiber_channel_single_polarization():
     y_max = np.max(np.abs(y_component))
     print(f"Y 分量最大值: {y_max:.4e}")
 
-    # 分析输出能量
-    output_state = FieldState(grid=pulse_x.grid, a_v=output.data, n_comp=2)
-    output_energy = output_state.energy
+    # 分析输出能量 - compute directly from time-domain output.data
+    output_energy = np.sum(np.abs(output.data) ** 2) * pulse_x.grid.dt
 
     # 预期能量：输入能量经过光纤损耗后，应该主要在 X 分量
     expected_loss_linear = 10 ** (-alpha_db * length / 1e3 / 10)
@@ -675,8 +689,8 @@ def test_fiber_channel_single_polarization():
     print(f"  能量比: {energy_ratio:.4f} (预期 ~{expected_loss_linear:.4f})")
 
     # 检查 X 分量能量占比 (应该 > 90%，因为 Y 是 padding 的零)
-    x_energy = np.sum(np.abs(output.data[0, :]) ** 2) * pulse_x.grid.dv
-    y_energy = np.sum(np.abs(output.data[1, :]) ** 2) * pulse_x.grid.dv
+    x_energy = np.sum(np.abs(output.data[0, :]) ** 2) * pulse_x.grid.dt
+    y_energy = np.sum(np.abs(output.data[1, :]) ** 2) * pulse_x.grid.dt
     x_ratio = x_energy / output_energy
 
     print("\n偏振能量分布:")
@@ -718,7 +732,7 @@ def test_fiber_channel_single_pol_dispersion():
         ctx=ctx,
     )
 
-    # 单偏振信号
+    # 单偏振信号 - FiberChannel expects time-domain input
     signal_ctx = SignalContext(
         sample_rate=bandwidth,
         center_freq=center_freq,
@@ -727,7 +741,8 @@ def test_fiber_channel_single_pol_dispersion():
         sym_rate=bandwidth,
         bits_per_symbol=1,
     )
-    signal = Signal(data=pulse_x.a_v_monotonic.reshape(1, -1), ctx=signal_ctx)
+    pulse_x_t = pulse_x.to_time(ctx)
+    signal = Signal(data=pulse_x_t.reshape(1, -1), ctx=signal_ctx)
 
     # 色散参数
     beta2 = -20.0  # ps^2/km (SMF 典型值)
@@ -766,12 +781,10 @@ def test_fiber_channel_single_pol_dispersion():
     )
 
     output = fiber.forward(signal)
-    output_state = FieldState(grid=pulse_x.grid, a_v=output.data, n_comp=2)
-    output_t = output_state.to_time(ctx)
 
-    # 分析输出脉冲
-    output_power = np.abs(output_t[0]) ** 2
-    output_fwhm = calculate_fwhm(output_state.grid.t_grid, output_power)
+    # 分析输出脉冲 - output.data is already time-domain from FiberChannel
+    output_power = np.abs(output.data[0]) ** 2
+    output_fwhm = calculate_fwhm(pulse_x.grid.t_grid, output_power)
 
     print(f"输出脉冲 FWHM: {output_fwhm * 1e12:.3f} ps")
     measured_broadening = output_fwhm / initial_fwhm

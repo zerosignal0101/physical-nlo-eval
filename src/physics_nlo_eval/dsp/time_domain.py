@@ -362,95 +362,112 @@ class FOCoarse(BaseBlock):
 class ChromaticDispersionComp(BaseBlock):
     """色度色散补偿 (CDC) 模块。
 
-    在频域通过乘法器补偿色度色散。
+    在频域通过乘法器补偿光纤传输中产生的二阶色散 (GVD) 和三阶色散 (TOD)。
+    该模块采用全信号 FFT 实现，适用于补偿累积色散。
 
     Parameters
     ----------
-    fiber_length_km : float, optional
-        需要补偿的光纤长度 (km)。
-    beta2_ps2_per_km : float, optional
-        光纤的二阶色散系数 (ps^2/km)。
+    fiber_length_km : float | None, optional
+        需要补偿的光纤长度 (km)。如果为 None，则尝试从信号 metadata 中获取 "fiber_length_km"。
+    beta2_ps2_per_km : float | None, optional
+        光纤的二阶色散系数 (ps^2/km)。如果为 None，则尝试从信号 metadata 中获取。
+    beta3_ps3_per_km : float | None, optional
+        光纤的三阶色散系数 (ps^3/km)。如果为 None，则尝试从信号 metadata 中获取。
     """
 
     def __init__(
         self,
         fiber_length_km: float | None = None,
-        beta2_ps2_per_km: float = -21.6,  # Typical SMF
+        beta2_ps2_per_km: float | None = None,
+        beta3_ps3_per_km: float | None = None,
     ) -> None:
         """初始化 ChromaticDispersionComp。"""
         super().__init__(name="CDC")
         self.fiber_length_km = fiber_length_km
         self.beta2_ps2_per_km = beta2_ps2_per_km
+        self.beta3_ps3_per_km = beta3_ps3_per_km
 
     def forward(self, signal: Signal) -> Signal:
-        """
-        执行频域色散补偿。
+        """执行频域色散补偿。
 
         Parameters
         ----------
         signal : Signal
-            输入的信号。数据形状为 (n_pol, N_samples)。
+            输入的复数基带信号，数据形状应为 (n_pol, N_samples)。
 
         Returns
         -------
         Signal
-            补偿色散后的信号。
+            补偿色散后的信号，上下文 metadata 中会记录补偿参数。
+
+        Raises
+        ------
+        ValueError
+            如果输入信号不是复数类型或维度不等于 2。
         """
         if not np.iscomplexobj(signal.data):
             raise ValueError("Input signal must be complex for CDC.")
         if signal.data.ndim != 2:
             raise ValueError("Input signal data must be 2D (n_pol, N_samples).")
 
-        # Get dispersion parameters
-        # Try to infer length from signal metadata if not provided
-        length_to_compensate_km = self.fiber_length_km
-        if length_to_compensate_km is None:
-            length_to_compensate_km = signal.ctx.meta.get("fiber_length_m", 0.0) / 1000.0
-            print(f"CDC: Using fiber length from metadata: {length_to_compensate_km:.1f} km.")
+        # 1. 参数提取与推断
+        length_km = self.fiber_length_km
+        if length_km is None:
+            length_km = float(signal.ctx.meta.get("fiber_length_m", 0.0)) / 1000.0
 
-        if length_to_compensate_km <= 0:
-            print("Warning: CDC length is zero or not specified. No CD compensation performed.")
+        if length_km <= 0:
+            # 若长度为0或未指定，直接返回原信号
             return signal
+
+        beta2 = self.beta2_ps2_per_km
+        if beta2 is None:
+            beta2 = float(signal.ctx.meta.get("fiber_beta2_ps2_per_km", 0.0))
+
+        beta3 = self.beta3_ps3_per_km
+        if beta3 is None:
+            beta3 = float(signal.ctx.meta.get("fiber_beta3_ps3_per_km", 0.0))
+
+        if beta2 == 0.0 and beta3 == 0.0:
+            raise ValueError("Zero beta, unable to compensate dispersion.")
 
         n_pol, num_samples = signal.data.shape
         sample_rate = signal.ctx.sample_rate
 
-        # Angular frequency grid
-        # omega = 2 * np.pi * np.fft.fftfreq(num_samples, d=1/sample_rate)
-        # Shifted to relative frequency around center (not optical frequency)
-        # For baseband, use freq = np.fft.fftfreq.
-        freq = np.fft.fftfreq(num_samples, d=1 / sample_rate)
+        # 2. 构建角频率网格 (rad/s)
+        # freq: [-fs/2, ..., fs/2-1], omega = 2 * pi * freq
+        freq = np.fft.fftfreq(num_samples, d=1.0 / sample_rate)
         omega = 2 * np.pi * freq
 
-        # CD Compensation Filter in frequency domain
-        # H(omega) = exp(j * beta2 * L * omega^2 / 2)
-        # Note: beta2 is usually in s^2/m, length in m.
-        # beta2_si = self.beta2_ps2_per_km * 1e-24  # ps^2/km to s^2/m
-        # length_si = length_to_compensate_km * 1000  # km to m
-        # dispersion_term = beta2_si * length_si / 2
+        # 3. 计算补偿相位
+        # 物理公式: H_fiber = exp(-j * (beta2/2 * omega^2 + beta3/6 * omega^3) * L)
+        # 补偿相位 (逆函数取共轭): phi = +(beta2/2 * omega^2 + beta3/6 * omega^3) * L
+        # 量纲转换说明:
+        # beta2: ps^2/km -> s^2/km 需要乘 1e-24
+        # beta3: ps^3/km -> s^3/km 需要乘 1e-36
+        # length_km 已是 km，无需额外转换
+        phase = ((beta2 * 1e-24) * (omega**2) / 2 + (beta3 * 1e-36) * (omega**3) / 6) * length_km
 
-        # Filter phase response
-        # CD effect: exp(-j * beta2 * L * omega^2 / 2)
-        # Compensation filter: exp(+j * beta2 * L * omega^2 / 2)
-        # Pay attention to the sign of beta2 and the sign in the formula.
-        # If beta2 < 0 for SMF in 1550nm, the phase delay is negative, so compensation should be positive phase.
+        # 4. 频域滤波
+        h_cdc = np.exp(1j * phase)
+        compensated_data = np.empty_like(signal.data, dtype=np.complex128)
 
-        # From definition, D = -2*pi*c/lambda^2 * beta2. D typically given in ps/(nm.km)
-        # beta2 in ps^2/km. In formula: beta2 * L * omega^2 / 2.
-        # omega here is baseband angular frequency.
-        # This formula usually assumes the optical carrier is removed, and omega is baseband frequency.
-
-        # beta2 is in ps^2/km, L in km
-        # omega in rad/s
-        # factor should be 1e-24 (ps^2 to s^2)
-        cdc_filter_phase = self.beta2_ps2_per_km * length_to_compensate_km * (omega**2) / 2 * 1e-24
-
-        # Apply to each polarization
-        compensated_data = np.empty_like(signal.data)
         for pol_idx in range(n_pol):
-            signal_fft = np.fft.fft(signal.data[pol_idx, :])
-            compensated_fft = signal_fft * np.exp(1j * cdc_filter_phase)
-            compensated_data[pol_idx, :] = np.fft.ifft(compensated_fft)
+            # 时域 -> 频域
+            sig_fft = np.fft.fft(signal.data[pol_idx, :])
+            # 频域相乘
+            sig_comp_fft = sig_fft * h_cdc
+            # 频域 -> 时域
+            compensated_data[pol_idx, :] = np.fft.ifft(sig_comp_fft)
+
+        # 5. 更新上下文与元数据
+        new_meta = (signal.ctx.meta or {}).copy()
+        new_meta.update(
+            {
+                "cdc_compensated_length_km": length_km,
+                "cdc_beta2_ps2_per_km": beta2,
+                "cdc_beta3_ps3_per_km": beta3,
+            }
+        )
 
         new_ctx = SignalContext(
             sample_rate=sample_rate,
@@ -460,10 +477,7 @@ class ChromaticDispersionComp(BaseBlock):
             sym_rate=signal.ctx.sym_rate,
             bits_per_symbol=signal.ctx.bits_per_symbol,
             is_ofdm=signal.ctx.is_ofdm,
-            meta={
-                **(signal.ctx.meta or {}),
-                "cdc_compensated_length_km": length_to_compensate_km,
-                "cdc_beta2_ps2_per_km": self.beta2_ps2_per_km,
-            },
+            meta=new_meta,
         )
-        return Signal(data=compensated_data.astype(np.complex64), ctx=new_ctx)
+
+        return Signal(data=compensated_data, ctx=new_ctx)

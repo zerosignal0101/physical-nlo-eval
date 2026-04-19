@@ -147,10 +147,13 @@ class FiberChannel(BaseBlock):
             ctx=self.compute_ctx,
         )
 
-        data_a_v = signal.data
+        # 转换到频率域单调序，构建 initial_state
+        data_a_v_monotonic = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(signal.data), axis=-1)) * grid.dt
         if signal.ctx.n_pol == 1:
-            data_a_v = self.compute_ctx.array.stack([signal.data[0], np.zeros_like(signal.data[0])])
-        initial_state = FieldState(grid=grid, a_v=data_a_v, n_comp=2)
+            data_a_v_monotonic = self.compute_ctx.array.stack(
+                [data_a_v_monotonic[0], np.zeros_like(data_a_v_monotonic[0])]
+            )
+        initial_state = FieldState(grid=grid, a_v=data_a_v_monotonic, n_comp=2)
 
         return grid, equation, initial_state
 
@@ -238,7 +241,7 @@ class FiberChannel(BaseBlock):
         )
 
         # 4. 获取最终场状态并转换为 Signal 对象
-        final_data = final_field_state.a_v[-1]  # Extract freq domain field
+        final_data = final_field_state.a_t[-1]  # Extract time domain field
 
         # Update SignalContext with channel effects (e.g., accumulated CD/PMD for tracking)
         new_ctx = SignalContext(
@@ -253,8 +256,8 @@ class FiberChannel(BaseBlock):
                 **(opt_signal.ctx.meta or {}),
                 "fiber_length_m": self.length_m,
                 "fiber_alpha_db_per_km": self.alpha_db_per_km,
-                "fiber_beta2_ps2_per_m": self.beta2_ps2_per_km,
-                "fiber_beta3_ps3_per_m": self.beta3_ps3_per_km,
+                "fiber_beta2_ps2_per_km": self.beta2_ps2_per_km,
+                "fiber_beta3_ps3_per_km": self.beta3_ps3_per_km,
                 "fiber_d_pmd_ps_per_sqrt_km": self.d_pmd_ps_per_sqrt_km,
                 "fiber_a_eff_um2": self.a_eff_um2,
                 "fiber_slope_a_eff_um2_per_nm": self.slope_a_eff_um2_per_nm,
