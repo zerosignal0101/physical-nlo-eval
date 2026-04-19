@@ -319,34 +319,10 @@ class EDFA(BaseBlock):
         # Or a specific optical filter bandwidth. Let's use sample_rate for now.
         noise_bandwidth = opt_signal.ctx.sample_rate  # Hz (electrical bandwidth)
 
-        # Noise power density (single-sided, per polarization)
-        # P_ase_per_pol_w = self.nf_linear * h * nu * self.gain_linear # * B_e
-
-        # Let's use a common approximation for ASE noise power for complex field:
-        # Noise variance per polarization, per sample
-        # N0_ase = self.nf_linear * h * nu * noise_bandwidth / (opt_signal.ctx.sps)
-        # Assuming the signal's power unit is mW.
-        # So we need to ensure the noise power also matches the unit.
-
-        # A more robust way: Noise Figure (NF) is F = (SNR_in / SNR_out)
-        # N_out = G * N_in + P_ase => P_ase = N_out - G*N_in
-        # For vacuum noise input, P_ase = NF * h * nu * B_opt
-
-        # For complex noise: sigma_n^2 = P_ase / (2 * N_samples) * (unit conversion)
-        # Let's simplify and generate a noise level based on an estimated optical noise power
-
-        # P_ase_linear_per_sample = self.nf_linear * h * nu * (opt_signal.ctx.sample_rate / opt_signal.ctx.sps)
-        # This P_ase_linear is in Watts per sample.
-        # If signal.data is in sqrt(mW), then sqrt(P_ase_linear * 1e3) will be the noise amplitude scale.
-
-        # A common simplified way: P_ase_total_per_pol = N_sp * h * nu * Bandwidth
-        # (where N_sp is spontaneous emission factor)
-        # And N_sp ~ NF_linear / 2 (if G >> 1).
-        # P_ase_total_per_pol = (self.nf_linear / 2) * h * nu * noise_bandwidth # Total power in Watts
-        # The complex noise has variance P_ase_total_per_pol / 2 for real/imag parts.
-
         # For our scale (signal power in mW), let's estimate noise power in mW.
-        noise_variance_per_sample = self.nf_linear * h * nu * noise_bandwidth * 1e3  # Convert to mW unit
+        noise_variance_per_sample = (
+            0.5 * self.nf_linear * self.gain_linear * h * nu * noise_bandwidth * 1e3
+        )  # Convert to mW unit
         # Divide by 2 because complex noise has real and imaginary parts
         noise_std_dev = np.sqrt(noise_variance_per_sample / 2)
 
