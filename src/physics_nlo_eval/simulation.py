@@ -9,7 +9,7 @@ from physics_nlo_eval.channel.fiber import (
 from physics_nlo_eval.core.base import BaseBlock
 from physics_nlo_eval.core.pipeline import Pipeline
 from physics_nlo_eval.dsp.carrier import PhaseNoiseCompensation
-from physics_nlo_eval.dsp.freq_domain import FOFine, OFDM_Demodulator
+from physics_nlo_eval.dsp.freq_domain import CommonPhaseNoiseCompensate, OFDM_Demodulator
 from physics_nlo_eval.dsp.mimo import MIMO_ChannelEstimation
 from physics_nlo_eval.dsp.time_domain import FOCoarse, Resampler, TimingRecovery
 from physics_nlo_eval.metrics.ber_evm import BERCalculator, Demapper
@@ -178,12 +178,12 @@ def run_simulation() -> None:
         rx_dsp_pipeline_blocks.append(OFDM_Demodulator(n_subcarriers=ofdm_n_subcarriers, cp_len=ofdm_cp_len))
         # Frequency Domain DSP for OFDM
         rx_dsp_pipeline_blocks.append(MIMO_ChannelEstimation(method="LS", ts_interval=10))  # Using TS for CE
-        rx_dsp_pipeline_blocks.append(FOFine(method="BPS"))  # Or pilot_assisted for OFDM
+        rx_dsp_pipeline_blocks.append(CommonPhaseNoiseCompensate(method="BPS"))  # Or pilot_assisted for OFDM
         rx_dsp_pipeline_blocks.append(PhaseNoiseCompensation(method="BPS"))  # Or pilot_assisted
     else:
         # Single-carrier DSP
         rx_dsp_pipeline_blocks.append(MIMO_ChannelEstimation(method="CMA", equalizer_length=11, cma_mu=1e-4))
-        rx_dsp_pipeline_blocks.append(FOFine(method="data_aided"))
+        rx_dsp_pipeline_blocks.append(CommonPhaseNoiseCompensate(method="data_aided"))
         rx_dsp_pipeline_blocks.append(PhaseNoiseCompensation(method="V&V"))  # BPS or V&V for SC
 
     rx_dsp_pipeline = Pipeline(rx_dsp_pipeline_blocks, name="RX_DSP_Pipeline")

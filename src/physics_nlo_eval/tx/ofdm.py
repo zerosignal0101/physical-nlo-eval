@@ -1,4 +1,4 @@
-"""实现 OFDM 调制（IFFT, CP 添加, 训练序列插入）。"""
+"""实现 OFDM 调制（IFFT, CP 添加, 训练序列插入, 频域导频插入）。"""
 
 import numpy as np
 
@@ -9,20 +9,22 @@ from physics_nlo_eval.core.signal import Signal, SignalContext
 class OFDMModulator(BaseBlock):
     """OFDM 调制模块。
 
-    执行 IFFT、添加循环前缀 (CP) 和插入训练序列 (TS)。
+    执行频域导频插入、IFFT、添加循环前缀 (CP) 和插入训练序列 (TS)。
 
     Parameters
     ----------
     n_subcarriers : int
-        OFDM 子载波数量。
+        OFDM 总子载波数量（FFT 大小）。
     cp_len : int
         循环前缀的长度。
     ts_pattern : np.ndarray | None, optional
-        用于训练序列的符号模式 (例如 Zadoff-Chu 序列)。
-        如果为 None，则不插入训练序列。
-        形状应为 (n_pol, n_subcarriers)。
-    num_data_symbols_per_frame : int
-        每帧的数据符号数 (不含训练符号)。
+        用于训练序列的频域符号模式。形状应为 (n_pol, n_subcarriers)。
+    num_data_symbols_per_frame : int, optional
+        每帧包含的 OFDM 符号数（不含训练符号），默认 100。
+    pilot_spacing : int, optional
+        频域导频间隔。若为 0 则不插入导频。例如 8 表示每 8 个子载波插入一个导频。
+    pilot_value : complex, optional
+        导频子载波使用的复数符号，默认 1.0 + 0j。
     """
 
     def __init__(
@@ -31,137 +33,149 @@ class OFDMModulator(BaseBlock):
         cp_len: int,
         ts_pattern: np.ndarray | None = None,
         num_data_symbols_per_frame: int = 100,
+        pilot_spacing: int = 0,
+        pilot_value: complex = 1.0 + 0j,
     ) -> None:
         """初始化 OFDMModulator。"""
         super().__init__(name="OFDMModulator")
         if not n_subcarriers > 0:
             raise ValueError("Number of subcarriers must be positive.")
-        if not cp_len >= 0:
-            raise ValueError("CP length must be non-negative.")
-        if not num_data_symbols_per_frame > 0:
-            raise ValueError("Number of data symbols per frame must be positive.")
+        if pilot_spacing < 0:
+            raise ValueError("Pilot spacing must be non-negative.")
 
         self.n_subcarriers = n_subcarriers
         self.cp_len = cp_len
         self.ts_pattern = ts_pattern
         self.num_data_symbols_per_frame = num_data_symbols_per_frame
-        self.fft_size = n_subcarriers  # OFDM 符号的时域长度 (不含 CP)
+        self.pilot_spacing = pilot_spacing
+        self.pilot_value = pilot_value
+        self.fft_size = n_subcarriers
+
+        # 预计算导频和数据子载波的索引
+        if self.pilot_spacing > 0:
+            self.pilot_indices = np.arange(0, self.n_subcarriers, self.pilot_spacing)
+            self.data_indices = np.setdiff1d(np.arange(self.n_subcarriers), self.pilot_indices)
+        else:
+            self.pilot_indices = np.array([], dtype=int)
+            self.data_indices = np.arange(self.n_subcarriers)
+
+        self.n_data_subcarriers = len(self.data_indices)
 
     def forward(self, symbols: Signal) -> Signal:
-        """
-        将 QAM 符号流转换为 OFDM 时域信号。
+        """将 QAM 符号流转换为 OFDM 时域信号。
 
         Parameters
         ----------
         symbols : Signal
             输入 QAM 符号信号。数据形状为 (n_pol, N_total_qam_symbols)。
-            每个符号已经通过 Mapper 进行了归一化。
 
         Returns
         -------
         Signal
-            输出 OFDM 时域信号。数据形状为 (n_pol, N_ofdm_samples)。
-            SignalContext 会更新 is_ofdm, sample_rate, sps 等。
+            输出 OFDM 时域信号。
         """
         if symbols.data.ndim != 2:
             raise ValueError("Input symbols data must be 2D (n_pol, N_symbols).")
 
         n_pol = symbols.ctx.n_pol
-        total_qam_symbols = symbols.data.shape[1]
+        total_input_symbols = symbols.data.shape[1]
 
-        # 确保每个偏振的符号数量足够填充帧
-        symbols_per_frame = self.n_subcarriers * self.num_data_symbols_per_frame
-        if total_qam_symbols < symbols_per_frame:
-            raise ValueError(
-                f"Not enough QAM symbols ({total_qam_symbols}) for one OFDM frame "
-                f"({symbols_per_frame} required). Consider padding or increasing input data."
-            )
+        # 计算每帧需要的净荷符号数
+        payload_symbols_per_frame = self.n_data_subcarriers * self.num_data_symbols_per_frame
+        num_frames = total_input_symbols // payload_symbols_per_frame
 
-        # 计算 OFDM 帧数量
-        num_frames = total_qam_symbols // symbols_per_frame
-        if total_qam_symbols % symbols_per_frame != 0:
-            print(
-                f"Warning: QAM symbols ({total_qam_symbols}) not perfectly divisible "
-                f"by symbols per frame ({symbols_per_frame}). Some symbols will be truncated."
-            )
+        if num_frames == 0:
+            raise ValueError(f"Not enough symbols for one OFDM frame. Need {payload_symbols_per_frame}.")
 
         ofdm_output_list: list[np.ndarray] = []
-        ts_location_meta: list[tuple[int, int]] = []  # (frame_idx, start_sample_in_frame)
+        ts_location_meta: list[tuple[int, int]] = []
+        has_ts = self.ts_pattern is not None
+        num_ts_symbols_per_frame = 1 if has_ts else 0
 
-        # 针对每个偏振进行 OFDM 调制
+        # 准备导频参考信息供后续 DSP 使用
+        # 形状为 (len(pilot_indices),)，在相位补偿时会被广播或按需复制
+        expected_pilot_symbols = np.full(len(self.pilot_indices), self.pilot_value, dtype=np.complex64)
+
         for pol_idx in range(n_pol):
-            pol_qam_symbols = symbols.data[pol_idx, :]
-            pol_ofdm_frames: list[np.ndarray] = []
+            pol_qam_data = symbols.data[pol_idx, :]
+            pol_time_series: list[np.ndarray] = []
 
             for frame_idx in range(num_frames):
-                frame_start_idx = frame_idx * symbols_per_frame
-                frame_end_idx = frame_start_idx + symbols_per_frame
+                # 1. 提取当前帧的净荷并填充到 OFDM 符号矩阵中
+                start_s = frame_idx * payload_symbols_per_frame
+                end_s = start_s + payload_symbols_per_frame
 
-                # Reshape QAM symbols into subcarrier-symbol matrix
-                # Shape: (n_subcarriers, num_data_symbols_per_frame)
-                subcarrier_symbols = pol_qam_symbols[frame_start_idx:frame_end_idx].reshape(
-                    self.n_subcarriers, self.num_data_symbols_per_frame
+                # 形状: (n_data_subcarriers, num_data_symbols_per_frame)，F-order 保证每列是一个 OFDM 符号
+                payload_grid = pol_qam_data[start_s:end_s].reshape(
+                    self.n_data_subcarriers, self.num_data_symbols_per_frame, order="F"
                 )
 
-                # Prepare for IFFT: (n_subcarriers, num_data_symbols_per_frame)
-                # Apply IFFT column-wise (over subcarriers for each symbol)
+                # 2. 构建完整的频域矩阵 (n_subcarriers, num_data_symbols_per_frame)
+                full_grid = np.zeros((self.n_subcarriers, self.num_data_symbols_per_frame), dtype=np.complex64)
+
+                # 插入导频
+                if self.pilot_spacing > 0:
+                    full_grid[self.pilot_indices, :] = self.pilot_value
+
+                # 插入净荷数据
+                full_grid[self.data_indices, :] = payload_grid
+
+                # 3. IFFT 变换到时域 (按列处理每个 OFDM 符号)
                 time_domain_symbols = (
-                    np.fft.ifft(subcarrier_symbols, axis=0) * self.n_subcarriers
-                )  # Scale by N for power preservation
+                    np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(full_grid, axes=0), axis=0), axes=0)
+                    * self.n_subcarriers
+                )
 
-                # Add CP to each OFDM symbol
-                # Shape: (fft_size + cp_len, num_data_symbols_per_frame)
-                ofdm_with_cp = np.vstack((time_domain_symbols[-self.cp_len :, :], time_domain_symbols))
+                # 4. 添加循环前缀 (CP)
+                # 取最后 cp_len 行拼接到前面
+                cp = time_domain_symbols[-self.cp_len :, :]
+                ofdm_symbols_with_cp = np.vstack((cp, time_domain_symbols))
 
-                # Flatten frame (time domain)
-                frame_time_domain = ofdm_with_cp.flatten()
+                # 5. 序列化当前帧的数据符号
+                frame_time_data = ofdm_symbols_with_cp.flatten(order="F")  # 按列展开，保证时间连续
 
-                # Insert TS if provided
+                # 6. 插入训练序列 (TS)
                 if self.ts_pattern is not None:
-                    # For simplicity, insert TS at the beginning of each frame (or after some symbols)
-                    # Real systems have more complex pilot/TS insertion
-                    ts_pol_pattern = self.ts_pattern[pol_idx, :]
-                    ts_time_domain = np.fft.ifft(ts_pol_pattern) * self.n_subcarriers
-                    ts_with_cp = np.hstack((ts_time_domain[-self.cp_len :], ts_time_domain))
+                    ts_freq = self.ts_pattern[pol_idx, :]
+                    ts_time = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(ts_freq))) * self.n_subcarriers
+                    ts_with_cp = np.concatenate((ts_time[-self.cp_len :], ts_time))
 
-                    # Decide insertion point. Here, prepend.
-                    frame_time_domain = np.concatenate([ts_with_cp, frame_time_domain])
-                    if pol_idx == 0:  # Only record TS location once per frame
-                        # TS length (with CP) = self.fft_size + self.cp_len
-                        # Start of TS within frame: 0
-                        # End of TS within frame: self.fft_size + self.cp_len
+                    # 在帧头插入 TS
+                    frame_time_data = np.concatenate([ts_with_cp, frame_time_data])
+
+                    if pol_idx == 0:
                         ts_location_meta.append((frame_idx, 0))
 
-                pol_ofdm_frames.append(frame_time_domain)
+                pol_time_series.append(frame_time_data)
 
-            ofdm_output_list.append(np.concatenate(pol_ofdm_frames))
+            ofdm_output_list.append(np.concatenate(pol_time_series))
 
-        ofdm_data = np.stack(ofdm_output_list, axis=0)  # Final shape (n_pol, N_ofdm_samples)
-
-        # Update SignalContext
-        # OFDM 的采样率就是 IFFT 后的时域采样率
-        # sps 在 OFDM 语境下通常指每子载波的符号数，但在这里为了保持与单载波一致，
-        # 我们让它反映每个 OFDM 符号的时域采样点数 (fft_size + cp_len)
-        # 此时的 sample_rate 对应于每个 OFDM 时域采样点
+        # 更新上下文
         new_sps = self.fft_size + self.cp_len
-        new_sample_rate = symbols.ctx.sym_rate * new_sps  # Baseband electrical signal rate
+        new_sample_rate = symbols.ctx.sym_rate * new_sps
 
         new_ctx = SignalContext(
             sample_rate=new_sample_rate,
-            center_freq=0.0,  # 仍然是基带电信号
+            center_freq=0.0,
             n_pol=n_pol,
-            sps=new_sps,  # Each OFDM symbol is effectively one "symbol" with this many samples
-            sym_rate=symbols.ctx.sym_rate,  # The original QAM symbol rate per subcarrier
-            bits_per_symbol=symbols.ctx.bits_per_symbol,  # QAM bits per symbol
+            sps=new_sps,
+            sym_rate=symbols.ctx.sym_rate,
+            bits_per_symbol=symbols.ctx.bits_per_symbol,
             is_ofdm=True,
             meta={
                 **(symbols.ctx.meta or {}),
                 "ofdm_n_subcarriers": self.n_subcarriers,
                 "ofdm_cp_len": self.cp_len,
-                "ofdm_fft_size": self.fft_size,
+                "ofdm_data_indices": self.data_indices,
+                "ofdm_pilot_subcarriers_indices": self.pilot_indices,
+                "ofdm_expected_pilot_symbols": expected_pilot_symbols,
+                "ofdm_pilot_spacing": self.pilot_spacing,
                 "ofdm_ts_pattern": self.ts_pattern,
-                "ofdm_ts_locations": ts_location_meta,  # Store if any TS was inserted
+                "ofdm_ts_locations": ts_location_meta,
                 "ofdm_num_data_symbols_per_frame": self.num_data_symbols_per_frame,
+                "ofdm_has_ts": has_ts,
+                "ofdm_num_ts_symbols_per_frame": num_ts_symbols_per_frame,
             },
         )
-        return Signal(data=ofdm_data.astype(np.complex64), ctx=new_ctx)
+
+        return Signal(data=np.stack(ofdm_output_list, axis=0).astype(np.complex64), ctx=new_ctx)

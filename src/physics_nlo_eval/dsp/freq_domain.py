@@ -55,8 +55,20 @@ class OFDM_Demodulator(BaseBlock):
 
         n_pol, num_total_samples = signal.data.shape
 
-        # Identify TS locations if available in metadata to exclude from data symbols
-        ts_locations = signal.ctx.meta.get("ofdm_ts_locations", [])
+        # Retrieve relevant TS and frame metadata
+        meta = signal.ctx.meta or {}
+        ts_locations = meta.get("ofdm_ts_locations", [])
+        num_data_symbols = meta.get("ofdm_num_data_symbols_per_frame", None)
+        num_ts_symbols = meta.get("ofdm_num_ts_symbols_per_frame", 1 if ts_locations else 0)
+
+        # Build a set of global symbol indices that correspond to Training Sequences
+        ts_global_indices = set()
+        if ts_locations and num_data_symbols is not None:
+            total_symbols_per_frame = num_data_symbols + num_ts_symbols
+            for frame_idx, ts_start_in_frame in ts_locations:
+                for offset in range(num_ts_symbols):
+                    global_idx = frame_idx * total_symbols_per_frame + ts_start_in_frame + offset
+                    ts_global_indices.add(global_idx)
 
         # Calculate number of OFDM symbols (including potential TS symbols)
         num_ofdm_symbols_total = num_total_samples // self.ofdm_symbol_len
@@ -66,205 +78,122 @@ class OFDM_Demodulator(BaseBlock):
                 f"OFDM symbol length ({self.ofdm_symbol_len}). Some samples will be truncated."
             )
 
-        demodulated_symbols_list: list[np.ndarray] = []
+        # Prepare containers: data symbols for signal.data, TS symbols for meta
+        data_symbols_list: list[list[np.ndarray]] = [[] for _ in range(n_pol)]
+        ts_symbols_list: list[list[np.ndarray]] = [[] for _ in range(n_pol)]
 
         for pol_idx in range(n_pol):
             pol_data = signal.data[pol_idx, :]
-            pol_freq_symbols: list[np.ndarray] = []
 
             for sym_idx in range(num_ofdm_symbols_total):
                 start_sample = sym_idx * self.ofdm_symbol_len
                 end_sample = start_sample + self.ofdm_symbol_len
 
                 if end_sample > num_total_samples:
-                    break  # Reached end of signal
+                    break
 
                 ofdm_symbol_time = pol_data[start_sample:end_sample]
 
-                # Skip if this is a TS symbol (handled separately by Channel Estimation)
-                is_ts_symbol = False
-                for _frame_idx, _ts_start_in_frame in ts_locations:
-                    # ts_start_sample_global = (
-                    #     _frame_idx
-                    #     * (num_ofdm_symbols_per_frame * ofdm_symbol_len + ts_len_with_cp)
-                    #     + _ts_start_in_frame
-                    # )
-                    # A more robust check is needed here to skip TS symbols from the data stream.
-                    # For simplicity now, we assume TS is at fixed location, like first symbol of each frame.
-                    # If the first symbol of a "frame" (logical grouping) is a TS
-                    # This check needs to be more sophisticated based on `ofdm_ts_locations`
-                    pass  # Placeholder: Implement actual TS skipping
+                # Check if this symbol belongs to the Training Sequence (TS) indices
+                is_ts_symbol = sym_idx in ts_global_indices
 
-                if not is_ts_symbol:
-                    # Remove CP
-                    ofdm_symbol_no_cp = ofdm_symbol_time[self.cp_len :]
+                # Remove CP and FFT to frequency domain
+                ofdm_symbol_no_cp = ofdm_symbol_time[self.cp_len :]
+                freq_domain_symbol = (
+                    np.fft.fftshift(np.fft.fft(np.fft.ifftshift(ofdm_symbol_no_cp))) / self.n_subcarriers
+                )
 
-                    # FFT
-                    freq_domain_symbol = (
-                        np.fft.fft(ofdm_symbol_no_cp) / self.n_subcarriers
-                    )  # Scale by N for power preservation
-                    pol_freq_symbols.append(freq_domain_symbol)
+                if is_ts_symbol:
+                    ts_symbols_list[pol_idx].append(freq_domain_symbol)
+                else:
+                    data_symbols_list[pol_idx].append(freq_domain_symbol)
 
-            # Stack symbols for this polarization: (N_subcarriers, N_symbols_per_pol)
-            if pol_freq_symbols:
-                demodulated_symbols_list.append(np.stack(pol_freq_symbols, axis=1))
-            else:
-                demodulated_symbols_list.append(np.array([]).reshape(self.n_subcarriers, 0))  # Empty if no symbols
-
-        # Stack polarizations: (n_pol, N_subcarriers, N_symbols)
-        # Handle potentially different numbers of symbols per polarization if TS skipping is asymmetric
-        max_symbols = max(s.shape[1] for s in demodulated_symbols_list)
-        padded_demod_symbols = np.array(
-            [np.pad(s, ((0, 0), (0, max_symbols - s.shape[1])), "constant") for s in demodulated_symbols_list]
+        # Assemble data symbols: (n_pol, n_subcarriers, n_data_symbols)
+        data_arrays = [np.stack(pol_list, axis=1) for pol_list in data_symbols_list]
+        max_data_symbols = max(s.shape[1] for s in data_arrays) if data_arrays else 0
+        padded_data = np.array(
+            [np.pad(s, ((0, 0), (0, max_data_symbols - s.shape[1])), "constant") for s in data_arrays]
         )
+
+        # Assemble TS symbols: (n_pol, n_subcarriers, n_ts_symbols) or None
+        ts_freq_symbols = None
+        if any(ts_symbols_list):
+            ts_arrays = [np.stack(pol_list, axis=1) for pol_list in ts_symbols_list]
+            ts_freq_symbols = np.array(ts_arrays)
 
         new_ctx = SignalContext(
-            sample_rate=signal.ctx.sym_rate,  # The effective symbol rate per subcarrier
+            sample_rate=signal.ctx.sym_rate,
             center_freq=signal.ctx.center_freq,
             n_pol=n_pol,
-            sps=1,  # 1 symbol per subcarrier (frequency domain)
+            sps=1,
             sym_rate=signal.ctx.sym_rate,
             bits_per_symbol=signal.ctx.bits_per_symbol,
-            is_ofdm=True,  # Still OFDM, but now in frequency domain
+            is_ofdm=True,
             meta={
-                **(signal.ctx.meta or {}),
+                **meta,
                 "ofdm_demodulated": True,
-                "ofdm_symbols_shape": padded_demod_symbols.shape,
+                "ofdm_ts_freq_symbols": ts_freq_symbols,
+                "ofdm_payload_shape": padded_data.shape,
             },
         )
-        return Signal(data=padded_demod_symbols.astype(np.complex64), ctx=new_ctx)
+        return Signal(data=padded_data.astype(np.complex64), ctx=new_ctx)
 
 
-class FOFine(BaseBlock):
-    """精细频偏补偿模块。
+class CommonPhaseNoiseCompensate(BaseBlock):
+    """OFDM 频域公共相位误差 (CPE) 补偿模块。
 
-    通常在频域进行，用于补偿残余的频率偏移。
-    在 OFDM 中，这可能涉及导频辅助或基于数据的估计。
-    此处实现一个简单的基于导频 (如果可用) 或数据循环的估计。
+    通过导频辅助估计并补偿每个 OFDM 符号的公共相位误差 (CPE)。
 
     Parameters
     ----------
     method : str, optional
-        精细频偏估计方法，例如 'pilot_assisted' (如果导频可用), 'data_aided'。
+        估计方法，当前仅支持 'pilot_assisted'。
     """
 
-    def __init__(self, method: str = "data_aided") -> None:
-        """初始化 FOFine。"""
-        super().__init__(name=f"FOFine({method})")
-        if method not in ["data_aided", "pilot_assisted"]:
-            raise ValueError(f"Unsupported fine frequency offset method: {method}.")
+    def __init__(self, method: str = "pilot_assisted") -> None:
+        """初始化 CommonPhaseNoiseCompensate。"""
+        super().__init__(name=f"CommonPhaseNoiseCompensate({method})")
+        if method not in ["pilot_assisted"]:
+            raise ValueError(f"Unsupported CPE estimation method: {method}.")
         self.method = method
 
     def forward(self, signal: Signal) -> Signal:
-        """
-        估计并补偿精细频偏。
+        """估计并补偿 OFDM 频域信号的 CPE。
 
         Parameters
         ----------
         signal : Signal
-            输入的信号。数据形状为 (n_pol, N_samples) (单载波) 或 (n_pol, N_subcarriers, N_symbols) (OFDM)。
+            输入的 OFDM 频域信号。数据形状为 (n_pol, N_subcarriers, N_symbols)。
 
         Returns
         -------
         Signal
-            补偿精细频偏后的信号。
+            补偿 CPE 后的 OFDM 频域信号。
         """
         if not np.iscomplexobj(signal.data):
             raise ValueError("Input signal must be complex.")
 
-        # Determine signal type and apply appropriate FO fine compensation
-        if signal.ctx.is_ofdm:
-            return self._ofdm_fine_freq_offset_comp(signal)
-        return self._sc_fine_freq_offset_comp(signal)
+        if not signal.ctx.is_ofdm:
+            raise ValueError("CommonPhaseNoiseCompensate module only supports OFDM signal.")
+        return self._ofdm_cpe_comp(signal)
 
-    def _sc_fine_freq_offset_comp(self, signal: Signal) -> Signal:
-        """单载波 (SC) 信号的精细频偏补偿。"""
-        n_pol, num_symbols = signal.data.shape
-        compensated_data = np.empty_like(signal.data)
-
-        # Data-aided method: Viterbi & Viterbi (V&V) or Decision-directed (DD)
-        # For simplicity, a simple power-of-M approach might be used for QPSK/16QAM
-        # For M-QAM, raise to power of 4 or 8 and detect phase rotation.
-
-        # Placeholder for data-aided method (e.g., squaring loop for QPSK)
-        # A more general approach is needed for higher-order QAM.
-        for pol_idx in range(n_pol):
-            # For 4-QAM, raise to power of 4 to remove modulation
-            # freq_offset_estimation = np.mean(signal.data[pol_idx, :]**4) # This will give average phase error.
-            # A more detailed approach involves filtering and finding the phase of a tone.
-
-            # Simple average phase error detection (assuming minimal phase change over segment)
-            # This is not a robust frequency offset estimator, more of a phase tracker.
-            avg_phase_error = np.angle(np.mean(signal.data[pol_idx, :] * np.roll(signal.data[pol_idx, :], -1).conj()))
-
-            # Convert phase error to frequency offset
-            # freq_offset = avg_phase_error / (2 * np.pi * (1/signal.ctx.sym_rate)) # Approx.
-
-            # Apply a slow compensation (e.g., track phase over time)
-            # For simplicity, apply a constant phase rotation
-            compensated_data[pol_idx, :] = signal.data[pol_idx, :] * np.exp(
-                -1j * avg_phase_error / 2
-            )  # Example: small compensation
-
-        print("Warning: Single-carrier fine frequency offset compensation is a simplified placeholder.")
-
-        new_ctx = SignalContext(
-            sample_rate=signal.ctx.sample_rate,
-            center_freq=signal.ctx.center_freq,
-            n_pol=n_pol,
-            sps=signal.ctx.sps,
-            sym_rate=signal.ctx.sym_rate,
-            bits_per_symbol=signal.ctx.bits_per_symbol,
-            is_ofdm=signal.ctx.is_ofdm,
-            meta={
-                **(signal.ctx.meta or {}),
-                "fine_freq_offset_compensated_sc": True,
-            },
-        )
-        return Signal(data=compensated_data, ctx=new_ctx)
-
-    def _ofdm_fine_freq_offset_comp(self, signal: Signal) -> Signal:
-        """OFDM 信号的精细频偏补偿。"""
+    def _ofdm_cpe_comp(self, signal: Signal) -> Signal:
+        """OFDM 信号的 CPE 估计与补偿。"""
         n_pol, n_subcarriers, n_symbols = signal.data.shape
-        compensated_data = signal.data.copy()  # Operate in place
-
-        # OFDM fine FO compensation: Usually relies on pilot tones (common phase error) or virtual carriers.
-        # If method is 'pilot_assisted', need pilot subcarrier locations and expected values from metadata.
-        # If method is 'data_aided', use differential detection or similar.
-
-        # For simplicity, estimate common phase error across all subcarriers and symbols
-        # This is more like common phase error (CPE) compensation, rather than inter-carrier interference (ICI)
-
-        total_phase_error_per_pol: list[float] = []
+        compensated_data = signal.data.copy()
 
         for pol_idx in range(n_pol):
-            # Example: differential detection in frequency domain for phase rotation
-            # Angle of average of (symbol[k] * conj(symbol[k-1]))
-            # This is more for phase noise tracking.
+            for sym_idx in range(n_symbols):
+                pilot_indices = signal.ctx.meta.get("ofdm_pilot_subcarriers_indices")
+                expected_pilots = signal.ctx.meta.get("ofdm_expected_pilot_symbols")
 
-            # Assume a common phase error (CPE) for all subcarriers within an OFDM symbol
-            # Estimate CPE for each symbol by averaging phase of data symbols or using pilot symbols.
+                if pilot_indices is None or expected_pilots is None:
+                    continue
 
-            if self.method == "pilot_assisted":
-                # Requires 'pilot_subcarriers' and 'expected_pilot_values' in metadata
-                # Placeholder logic:
-                # pilots_rx = signal.data[pol_idx, pilot_subcarrier_indices, :]
-                # pilots_tx = expected_pilot_values
-                # error_per_symbol = np.angle(np.mean(pilots_rx * pilots_tx.conj(), axis=0))
-                pass  # TODO: Implement pilot-assisted
-            else:  # Data-aided (simplified)
-                # For each symbol, estimate a common phase rotation
-                # by averaging the phase of all received symbols.
-                # This works if the constellation is symmetric or if there's a strong phase error.
-
-                cpe_per_symbol = np.angle(np.mean(compensated_data[pol_idx, :, :], axis=0))  # Shape (N_symbols,)
-                total_phase_error_per_pol.append(np.mean(cpe_per_symbol))  # Track total estimated phase error
-
-                # Apply compensation for each symbol
-                for sym_idx in range(n_symbols):
-                    compensated_data[pol_idx, :, sym_idx] *= np.exp(-1j * cpe_per_symbol[sym_idx])
-
-        print(f"Warning: OFDM fine frequency offset compensation ({self.method}) is a simplified placeholder.")
+                rx_pilots = signal.data[pol_idx, pilot_indices, sym_idx]
+                tx_pilots = expected_pilots[pol_idx, :, sym_idx] if expected_pilots.ndim == 3 else expected_pilots
+                cpe = np.angle(np.mean(rx_pilots * tx_pilots.conj()))
+                compensated_data[pol_idx, :, sym_idx] *= np.exp(-1j * cpe)
 
         new_ctx = SignalContext(
             sample_rate=signal.ctx.sample_rate,
@@ -276,8 +205,7 @@ class FOFine(BaseBlock):
             is_ofdm=signal.ctx.is_ofdm,
             meta={
                 **(signal.ctx.meta or {}),
-                "fine_freq_offset_compensated_ofdm": True,
-                "fine_freq_offset_estimated_per_pol": total_phase_error_per_pol,
+                "ofdm_cpe_compensated": True,
             },
         )
         return Signal(data=compensated_data, ctx=new_ctx)
