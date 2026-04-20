@@ -85,6 +85,97 @@ class Resampler(BaseBlock):
         return Signal(data=resampled_data.astype(np.complex64), ctx=new_ctx)
 
 
+class OFDMChannelEstimator(BaseBlock):
+    """OFDM 信道估计与均衡模块。
+
+    使用 Least Squares (LS) 算法估计每个子载波的频率响应，
+    并对 payload 数据进行 Zero-Forcing (ZF) 均衡。
+
+    Parameters
+    ----------
+    estimation_method : str, optional
+        估计方法，目前支持 'LS' (Least Squares)。
+    smooth_subcarriers : bool, optional
+        是否对估计的信道响应在子载波维度进行平滑（减少噪声影响），默认 False。
+    """
+
+    def __init__(self, estimation_method: str = "LS", smooth_subcarriers: bool = False) -> None:
+        super().__init__(name=f"ChannelEstimator({estimation_method})")
+        self.estimation_method = estimation_method
+        self.smooth_subcarriers = smooth_subcarriers
+
+    def forward(self, signal: Signal) -> Signal:
+        """执行信道估计与均衡。
+
+        要求输入 Signal 的 meta 中包含:
+        - 'ofdm_ts_freq_symbols': 接收端提取的 TS (n_pol, n_sub, n_frames)
+        - 'ofdm_ts_pattern': 发射端原始 TS 模式 (n_pol, n_sub)
+        - 'ofdm_num_data_symbols_per_frame': 每帧的数据符号数
+        """
+        if not signal.ctx.is_ofdm:
+            raise ValueError("Signal is not OFDM.")
+
+        meta = signal.ctx.meta or {}
+        rx_ts = meta.get("ofdm_ts_freq_symbols")  # (n_pol, n_sub, n_frames)
+        tx_ts = meta.get("ofdm_ts_pattern")  # (n_pol, n_sub)
+        num_data_syms_per_frame = meta.get("ofdm_num_data_symbols_per_frame")
+
+        if rx_ts is None or tx_ts is None:
+            raise ValueError("TS patterns not found in signal metadata. Demodulator must extract TS first.")
+
+        n_pol, n_sub, n_frames = rx_ts.shape
+        # 数据当前的形状 (n_pol, n_sub, total_data_symbols)
+        n_pol_data, n_sub_data, n_total_syms = signal.data.shape
+
+        # 1. 信道估计 (LS: H = Y / X)
+        # 将 tx_ts 广播到 rx_ts 的形状
+        tx_ts_expanded = np.repeat(tx_ts[:, :, np.newaxis], n_frames, axis=2)
+
+        # 计算每一帧、每一极化、每个子载波的信道响应 H
+        # 避免除以 0
+        eps = 1e-12
+        h_est = rx_ts / (tx_ts_expanded + eps)
+
+        # (可选) 在子载波上平滑以抑制噪声
+        if self.smooth_subcarriers:
+            from scipy.ndimage import uniform_filter1d
+
+            h_est = uniform_filter1d(h_est, size=3, axis=1)
+
+        # 2. 均衡 (ZF: X_hat = Y / H)
+        equalized_data = np.zeros_like(signal.data)
+
+        # 遍历每一帧进行均衡
+        for f_idx in range(n_frames):
+            start_idx = f_idx * num_data_syms_per_frame
+            end_idx = min((f_idx + 1) * num_data_syms_per_frame, n_total_syms)
+
+            if start_idx >= n_total_syms:
+                break
+
+            # 提取当前帧的信道估计结果 (n_pol, n_sub)
+            h_frame = h_est[:, :, f_idx]
+
+            # 对该帧内的所有数据符号进行均衡
+            # 形状：(n_pol, n_sub, symbols_in_this_frame)
+            frame_data = signal.data[:, :, start_idx:end_idx]
+
+            # 执行均衡 (对每个符号应用对应的子载波增益)
+            h_frame_expanded = h_frame[:, :, np.newaxis]
+            equalized_data[:, :, start_idx:end_idx] = frame_data / (h_frame_expanded + eps)
+
+        # Update Context
+        new_meta = {
+            **meta,
+            "ofdm_channel_response": h_est,
+            "ofdm_equalized": True,
+        }
+        new_ctx = signal.ctx.copy()
+        new_ctx.meta = new_meta
+
+        return Signal(data=equalized_data, ctx=new_ctx)
+
+
 class TimingRecovery(BaseBlock):
     """定时同步模块。
 

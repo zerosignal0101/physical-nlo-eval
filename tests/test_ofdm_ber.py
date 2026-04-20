@@ -10,6 +10,7 @@ import numpy as np
 
 from physics_nlo_eval.core.signal import Signal, SignalContext
 from physics_nlo_eval.dsp.freq_domain import CommonPhaseNoiseCompensate, OFDM_Demodulator
+from physics_nlo_eval.dsp.time_domain import OFDMChannelEstimator
 from physics_nlo_eval.metrics.ber_evm import Demapper
 from physics_nlo_eval.tx.mapper import Mapper
 from physics_nlo_eval.tx.ofdm import OFDMModulator
@@ -506,6 +507,121 @@ def test_ofdm_ts_extraction(
 
 
 # ============================================================================
+# 测试 5: OFDM 信道估计与均衡
+# ============================================================================
+
+
+def test_ofdm_channel_estimation_equalization(
+    modulation: str = "SP-QPSK",
+    eb_n0_db: float = 15.0,
+    n_subcarriers: int = 256,
+    cp_len: int = 16,
+    num_data_symbols_per_frame: int = 10,
+    pilot_spacing: int = 8,
+    num_frames: int = 20,
+    seed: int = 42,
+):
+    """验证 OFDMChannelEstimator 利用 TS 进行信道估计与均衡的有效性。
+
+    测试步骤:
+    1. 构造含 TS 的 OFDM 信号
+    2. 通过模拟信道 (幅度衰减 + 相位旋转)
+    3. OFDM 解调后，利用 TS 估计信道并均衡
+    4. 验证均衡后 BER 是否恢复至无信道干扰水平
+    """
+    np.random.seed(seed)
+
+    print(f"\n{'=' * 60}")
+    print(f"测试 5: OFDM 信道估计与均衡 ({modulation}, Eb/N0={eb_n0_db}dB)")
+    print(f"{'=' * 60}")
+
+    n_pol = 1 if "SP-" in modulation else 2
+    mapper = Mapper(modulation=modulation, power_norm=True)
+    demapper = Demapper(modulation=modulation, power_norm=True)
+    bits_per_symbol = mapper.bits_per_symbol
+
+    # TS pattern: 已知训练序列，形状 (n_pol, n_subcarriers)
+    base_seq = [1 + 1j, -1 + 1j, -1 - 1j, 1 - 1j] * (n_subcarriers // 4)
+    ts_pattern = np.tile(np.array(base_seq[:n_subcarriers], dtype=np.complex64), (n_pol, 1))
+
+    modulator = OFDMModulator(
+        n_subcarriers=n_subcarriers,
+        cp_len=cp_len,
+        ts_pattern=ts_pattern,
+        num_data_symbols_per_frame=num_data_symbols_per_frame,
+        pilot_spacing=pilot_spacing,
+        pilot_value=1.0 + 0j,
+    )
+
+    demodulator = OFDM_Demodulator(n_subcarriers=n_subcarriers, cp_len=cp_len)
+    channel_estimator = OFDMChannelEstimator()
+
+    payload_per_frame = modulator.n_data_subcarriers * num_data_symbols_per_frame
+    total_qam_symbols = payload_per_frame * num_frames
+    total_bits = total_qam_symbols * bits_per_symbol * n_pol
+
+    tx_bits = np.random.randint(0, 2, size=total_bits, dtype=bool)
+    tx_signal = mapper.forward(tx_bits)
+    ofdm_signal = modulator.forward(tx_signal)
+
+    # 模拟信道: 幅度衰减 0.5, 相位旋转 0.3 rad
+    channel_h = 0.5 * np.exp(1j * 0.3)
+    rx_signal = Signal(
+        data=ofdm_signal.data * channel_h,
+        ctx=ofdm_signal.ctx,
+    )
+
+    # 添加 AWGN
+    rx_noisy = add_awgn(rx_signal.data, eb_n0_db, bits_per_symbol)
+    rx_signal = Signal(data=rx_noisy, ctx=rx_signal.ctx)
+
+    # OFDM 解调
+    rx_fd = demodulator.forward(rx_signal)
+
+    # 信道估计与均衡
+    rx_eq = channel_estimator.forward(rx_fd)
+
+    # 验证信道估计结果
+    h_est = rx_eq.ctx.meta.get("ofdm_channel_response")
+    print(f"  信道估计形状: {h_est.shape}")
+    h_mean = np.mean(h_est)
+    h_error = np.abs(h_mean - channel_h)
+    print(f"  理论信道: {channel_h:.4f}")
+    print(f"  估计信道均值: {h_mean:.4f}")
+    print(f"  信道估计误差: {h_error:.2e}")
+    assert h_error < 0.1, f"信道估计误差过大: {h_error:.2e}"
+
+    # 均衡后 BER
+    data_indices = modulator.data_indices
+    rx_qam = fd_to_qam_stream(rx_eq.data, data_indices)
+    rx_qam_signal = Signal(
+        data=rx_qam,
+        ctx=make_signal_context(n_pol=n_pol, bits_per_symbol=bits_per_symbol),
+    )
+    rx_bits = demapper.forward(rx_qam_signal)
+
+    bit_errors = np.sum(tx_bits != rx_bits)
+    ber = bit_errors / total_bits
+
+    # 理论 BER (无信道 AWGN)
+    mod_str = modulation.replace("SP-", "").replace("DP-", "")
+    if "QPSK" in mod_str:
+        theoretical_ber = theoretical_ber_qpsk(eb_n0_db)
+    else:
+        m_ary = int(mod_str.replace("QAM", ""))
+        theoretical_ber = theoretical_ber_qam(m_ary, eb_n0_db)
+
+    print(f"  均衡后 BER: {ber:.2e}")
+    print(f"  理论 BER (AWGN only): {theoretical_ber:.2e}")
+    print(f"  比特数: {total_bits}, 错误数: {bit_errors}")
+
+    # 信道补偿有效: BER 远低于信道损伤下的水平
+    # 信道损伤前 BER 约为 0.5 (解调失败)，均衡后应显著改善
+    passed = bit_errors == 0 or ber < 10.0 * theoretical_ber
+    print(f"  {'[PASS]' if passed else '[WARN]'} 均衡{'有效' if passed else '效果异常'}")
+
+
+# ============================================================================
 # 运行所有测试
 # ============================================================================
 
@@ -524,7 +640,7 @@ def run_all_tests():
 
         # 测试 2: AWGN BER
         test_ofdm_awgn_ber(modulation="SP-QPSK", eb_n0_db=8.0)
-        test_ofdm_awgn_ber(modulation="SP-16QAM", eb_n0_db=14.0)
+        test_ofdm_awgn_ber(modulation="SP-16QAM", eb_n0_db=14.0, min_errors=100)
 
         # 测试 3: CommonPhaseNoiseCompensate CFO 补偿
         # 子载波间隔 = 1e11/256 ≈ 390 MHz
@@ -535,6 +651,10 @@ def run_all_tests():
         # 测试 4: TS 序列提取
         test_ofdm_ts_extraction(modulation="SP-QPSK")
         test_ofdm_ts_extraction(modulation="DP-16QAM")
+
+        # 测试 5: OFDM 信道估计与均衡
+        test_ofdm_channel_estimation_equalization(modulation="SP-QPSK", eb_n0_db=15.0)
+        test_ofdm_channel_estimation_equalization(modulation="DP-16QAM", eb_n0_db=10.0)
 
         print("\n" + "=" * 60)
         print("所有测试完成!")

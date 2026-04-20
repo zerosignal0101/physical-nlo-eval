@@ -52,6 +52,10 @@ class SignalContext:
         if self.meta is None:
             self.meta = {}
 
+    def copy(self) -> "SignalContext":
+        """返回 SignalContext 的深拷贝。"""
+        return self.__class__(**{**self.__dict__, "meta": {**(self.meta or {})}})
+
 
 class Signal:
     """统一的信号数据载体。
