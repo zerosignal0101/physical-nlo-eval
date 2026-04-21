@@ -106,7 +106,7 @@ def test_wdm_fiber(
     print(f"{'=' * 60}")
 
     # ---- TX ----
-    mapper = Mapper(modulation=modulation, power_norm=True)
+    mapper = Mapper(modulation=modulation, power_norm=True, sym_rate=SYMBOL_RATE_HZ)
     demapper = Demapper(modulation=modulation, power_norm=True)
     tx_rrc = RRCFilter(sps=RRC_SPS, roll_off=RRC_ROLL_OFF, is_matched_filter=False)
     rx_rrc = RRCFilter(sps=RRC_SPS, roll_off=RRC_ROLL_OFF, is_matched_filter=True)
@@ -125,8 +125,6 @@ def test_wdm_fiber(
         all_bits.append(tx_bits)
 
         sig = mapper.forward(tx_bits)
-        sig.ctx.sample_rate = SYMBOL_RATE_HZ
-        sig.ctx.sym_rate = SYMBOL_RATE_HZ
         sig_rrc = tx_rrc.forward(sig)
         channels.append(sig_rrc)
 

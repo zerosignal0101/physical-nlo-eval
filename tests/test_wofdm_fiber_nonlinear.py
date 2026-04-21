@@ -125,7 +125,8 @@ def test_wofdm_fiber(
 
     # ---- TX ----
     n_pol_tx = 2 if "DP-" in modulation else 1
-    mapper = Mapper(modulation=modulation, power_norm=True)
+    sym_rate = SYM_RATE_GBD * 1e9
+    mapper = Mapper(modulation=modulation, power_norm=True, sym_rate=sym_rate)
     modulator = WindowedOFDMModulator(
         n_subcarriers=N_SUBCARRIERS,
         cp_len=CP_LEN,
@@ -146,7 +147,6 @@ def test_wofdm_fiber(
     ofdm_signal = modulator.forward(tx_signal)
 
     effective_sps = modulator.effective_output_sym_len  # n_sub + cp = 32+4=36
-    sym_rate = SYM_RATE_GBD * 1e9
     sample_rate = sym_rate * effective_sps
 
     print(f"  W-OFDM: {N_SUBCARRIERS} SC, CP={CP_LEN}, β={BETA}, effective SPS={effective_sps}")

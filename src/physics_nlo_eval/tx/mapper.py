@@ -110,6 +110,9 @@ class Mapper(BaseBlock):
         }
     diff_coding : bool, optional
         是否启用象限差分编码，默认为 False。
+    sym_rate : float, optional
+        物理符号率 (symbols/s)，默认为 1.0 (归一化)。
+        用于在 SignalContext 中设置正确的 sample_rate = sym_rate * sps。
     """
 
     def __init__(
@@ -119,12 +122,14 @@ class Mapper(BaseBlock):
         prob_shaping: dict[str, float] | None = None,
         pilot_info: dict | None = None,
         diff_coding: bool = False,
+        sym_rate: float = 1.0,
     ) -> None:
         super().__init__(name=f"Mapper({modulation})")
         # 组合 Constellation 类
         self.constellation = Constellation(modulation, power_norm, prob_shaping)
         self.pilot_info = pilot_info
         self.diff_coding = diff_coding
+        self.sym_rate = sym_rate
 
     def _diff_encode(self, symbol_indices: np.ndarray) -> np.ndarray:
         """基于象限的差分编码 (适用于 QPSK/QAM)。"""
@@ -229,10 +234,11 @@ class Mapper(BaseBlock):
             data = np.stack([framed_x, framed_y], axis=0)
 
         ctx = SignalContext(
-            sample_rate=1.0,
+            sample_rate=self.sym_rate,  # 物理符号率 (sample_rate = sym_rate * sps, sps=1)
             center_freq=0.0,
             n_pol=cst.n_pol,
             sps=1,
+            sym_rate=self.sym_rate,
             bits_per_symbol=cst.bits_per_symbol,
             meta={
                 "modulation": cst.modulation,
@@ -240,6 +246,5 @@ class Mapper(BaseBlock):
                 "entropy": -np.sum(cst.ps_probs * np.log2(cst.ps_probs + 1e-12)),
             },
         )
-        ctx.sym_rate = ctx.sample_rate / ctx.sps
 
         return Signal(data=data.astype(np.complex64), ctx=ctx)
