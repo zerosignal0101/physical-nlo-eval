@@ -1,1 +1,0 @@
-"""Paths common module."""

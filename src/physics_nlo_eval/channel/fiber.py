@@ -151,13 +151,18 @@ class FiberChannel(BaseBlock):
         data_a_v_monotonic = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(signal.data), axis=-1)) * grid.dt
         if signal.ctx.n_pol == 1:
             data_a_v_monotonic = self.compute_ctx.array.stack(
-                [data_a_v_monotonic[0], np.zeros_like(data_a_v_monotonic[0])]
+                [
+                    self.compute_ctx.array.asarray(data_a_v_monotonic[0]),
+                    self.compute_ctx.array.zeros_like(data_a_v_monotonic[0]),
+                ]
             )
+        else:
+            data_a_v_monotonic = self.compute_ctx.array.asarray(data_a_v_monotonic)
         initial_state = FieldState(grid=grid, a_v=data_a_v_monotonic, n_comp=2)
 
         return grid, equation, initial_state
 
-    def generate_random_unitary(self) -> np.ndarray:
+    def generate_random_unitary(self):
         """Generate random 2x2 unitary matrix for PMD."""
         theta = np.arcsin(np.sqrt(np.random.rand()))
         phi = 2 * np.pi * np.random.rand()
@@ -168,7 +173,8 @@ class FiberChannel(BaseBlock):
         r10 = -np.sin(theta) * np.exp(-1j * psi)
         r11 = np.cos(theta) * np.exp(-1j * phi)
 
-        return self.compute_ctx.array.asarray([[r00, r01], [r10, r11]])
+        unitary = np.array([[r00, r01], [r10, r11]], dtype=np.complex128)
+        return self.compute_ctx.array.asarray(unitary)
 
     def apply_pmd_scat(self, z: float, state: FieldState) -> None:
         """Apply one PMD scattering event.
@@ -229,7 +235,7 @@ class FiberChannel(BaseBlock):
             callbacks = [self.apply_pmd_scat]
         else:
             callbacks = None
-        final_field_state = propagator.run(
+        final_simulation_result = propagator.run(
             initial_state=initial_field_state,
             z_grid=self.z_grid,
             equation=equation,
@@ -241,7 +247,7 @@ class FiberChannel(BaseBlock):
         )
 
         # 4. 获取最终场状态并转换为 Signal 对象
-        final_data = final_field_state.a_t[-1]  # Extract time domain field
+        final_data = final_simulation_result.a_t[-1]  # Extract time domain field
 
         # Update SignalContext with channel effects (e.g., accumulated CD/PMD for tracking)
         new_ctx = SignalContext(
