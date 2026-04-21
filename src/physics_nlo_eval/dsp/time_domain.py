@@ -1,6 +1,8 @@
 """时域 DSP 模块：重采样、定时同步、粗频偏补偿。"""
 
 import numpy as np
+from scipy.interpolate import interp1d
+from scipy.signal import resample_poly
 
 from physics_nlo_eval.core.base import BaseBlock
 from physics_nlo_eval.core.signal import Signal, SignalContext
@@ -9,22 +11,20 @@ from physics_nlo_eval.core.signal import Signal, SignalContext
 class Resampler(BaseBlock):
     """重采样模块。
 
-    用于改变信号的采样率。
+    用于改变信号的采样率。内部使用多相 FIR 抗混叠滤波器进行高质量重采样。
 
     Parameters
     ----------
     target_sps : int
         目标每符号采样点数 (Samples per Symbol)。
-        例如，如果原始信号为 2 sps，目标为 1 sps，则进行 2 倍下采样。
-        如果目标采样率与当前采样率不兼容，将报错。
     resampling_filter : str, optional
-        重采样滤波器类型，目前支持 'fir' (理想 FIR 低通)。
+        重采样滤波器类型，目前支持 'fir' (使用 scipy resample_poly)。
     """
 
     def __init__(self, target_sps: int, resampling_filter: str = "fir") -> None:
         """初始化 Resampler。"""
         super().__init__(name=f"Resampler({target_sps}sps)")
-        if not target_sps > 0:
+        if target_sps <= 0:
             raise ValueError("Target sps must be positive.")
         if resampling_filter not in ["fir"]:
             raise ValueError(f"Unsupported resampling filter: {resampling_filter}. Currently only 'fir' is supported.")
@@ -34,7 +34,7 @@ class Resampler(BaseBlock):
 
     def forward(self, signal: Signal) -> Signal:
         """
-        对信号进行重采样。
+        对信号进行重采样 (内置多相抗混叠滤波器)。
 
         Parameters
         ----------
@@ -50,25 +50,8 @@ class Resampler(BaseBlock):
         if current_sps == self.target_sps:
             return signal  # No resampling needed
 
-        if current_sps % self.target_sps != 0 and self.target_sps % current_sps != 0:
-            raise ValueError(
-                f"Resampling factor (from {current_sps} to {self.target_sps} sps) is not an integer or its inverse. "
-                "Non-integer rational resampling not yet supported by this simple implementation."
-            )
-
-        if self.target_sps < current_sps:  # Downsampling
-            factor = current_sps // self.target_sps
-            # Simple decimation after filtering (ideal low-pass)
-            # In real DSP, an actual anti-aliasing filter is used before decimation.
-            # Here, we mimic with scipy's resample_poly for simplicity.
-            # Or just simple decimation if no filter needed
-            resampled_data = signal.data[:, ::factor]
-        else:  # Upsampling
-            factor = self.target_sps // current_sps
-            # Simple zero-padding in frequency domain (or interpolate in time domain)
-            # This is more complex than simple decimation
-            # For simplicity, let's assume this is not a common path or require advanced filter design.
-            raise NotImplementedError("Upsampling is not yet implemented in this simple Resampler.")
+        # 使用 scipy.signal.resample_poly 处理任意有理数比例重采样，内置高阶多相 FIR 抗混叠滤波
+        resampled_data = resample_poly(signal.data, self.target_sps, current_sps, axis=-1)
 
         new_sample_rate = signal.ctx.sym_rate * self.target_sps
 
@@ -177,171 +160,114 @@ class OFDMChannelEstimator(BaseBlock):
 
 
 class TimingRecovery(BaseBlock):
-    """定时同步模块。
+    """基于 Oerder & Meyer 平方算法的前馈定时同步模块。
 
-    使用 Gardner 算法进行符号同步。
+    该算法通过计算信号平方后的离散傅里叶变换(DFT)在符号速率处的分量，
+    直接估计出全局或分段的定时相位偏移。没有反馈环路，无收敛时间。
 
     Parameters
     ----------
-    sps_in : int, optional
-        输入信号的每符号采样点数。
-    gardner_loop_filter_gain : float, optional
-        Gardner 环路滤波器增益。
+    sps_in : int
+        输入信号的每符号采样点数。要求 >= 2，推荐 >= 4 以获得更高精度。
+    block_size : int, optional
+        进行相位估计的块大小（符号数）。如果设为 None，则对整个信号进行单一相位估计。
+        如果信号存在采样频率失配（Sampling Frequency Offset），建议设置较小的块（如 1000）。
     """
 
-    def __init__(self, sps_in: int = 2, gardner_loop_filter_gain: float = 0.01) -> None:
-        """初始化 TimingRecovery。"""
-        super().__init__(name="TimingRecovery(Gardner)")
-        if not sps_in > 1:
-            raise ValueError("Input sps for timing recovery must be > 1.")
-
+    def __init__(self, sps_in: int = 4, block_size: int | None = None) -> None:
+        super().__init__(name="OerderMeyerTimingRecovery")
         self.sps_in = sps_in
-        self.gardner_loop_filter_gain = gardner_loop_filter_gain
-        # For simplicity, we assume output is 1 sps.
+        self.block_size = block_size
 
-    def _gardner_timing_recovery(self, signal_data: np.ndarray) -> np.ndarray:
-        """
-        执行 Gardner 定时误差检测和补偿。
+    def _estimate_phase(self, data: np.ndarray) -> np.ndarray:
+        """估计采样相位偏移 (U.I.)。"""
+        n_samples = len(data)
+        # 1. 信号非线性变换：平方（提取时钟音调）
+        sq_data = np.abs(data) ** 2
 
-        Parameters
-        ----------
-        signal_data : np.ndarray
-            输入的信号数据，形状为 (n_pol, N_samples)。
+        # 如果不分块，对整个信号计算
+        if self.block_size is None:
+            # 计算在符号速率频率处的 DFT
+            # 频率对应于 1/sps_in (已归一化到采样率)
+            t = np.arange(n_samples)
+            clock_tone = np.sum(sq_data * np.exp(-1j * 2 * np.pi * t / self.sps_in))
+            phase = -np.angle(clock_tone) / (2 * np.pi)
+            return np.array([phase])
+        else:
+            # 分块估计相位以跟踪缓慢的定时漂移
+            samples_per_block = self.block_size * self.sps_in
+            num_blocks = n_samples // samples_per_block
 
-        Returns
-        -------
-        np.ndarray
-            定时同步后的符号序列，形状为 (n_pol, N_symbols)。
-        """
-        n_pol, num_samples = signal_data.shape
-        output_symbols = []
+            phases = []
+            for i in range(num_blocks):
+                block = sq_data[i * samples_per_block : (i + 1) * samples_per_block]
+                t = np.arange(len(block))
+                tone = np.sum(block * np.exp(-1j * 2 * np.pi * t / self.sps_in))
+                phases.append(-np.angle(tone) / (2 * np.pi))
 
-        # Gardner detector works on samples at 2*symbol_rate
-        if self.sps_in != 2:
-            print(
-                f"Warning: Gardner detector typically expects 2 samples/symbol. "
-                f"Input sps is {self.sps_in}. Performance may vary."
-            )
-
-        for pol_idx in range(n_pol):
-            current_pol_data = signal_data[pol_idx, :]
-
-            # Initialize timing phase (fractional sample offset)
-            timing_phase = 0.0
-            # Initialize loop filter output (for integrating timing error)
-            integral = 0.0
-
-            symbols_per_pol: list[complex] = []
-
-            # Start index for first symbol
-            idx = self.sps_in // 2  # Start in the middle of first symbol interval if sps=2
-
-            while idx < num_samples - self.sps_in:
-                # Get samples around current timing estimate
-                # x_k-1 (previous symbol), x_k-1/2 (mid-point), x_k (current symbol)
-                # Gardner error = Re(x_k-1/2 * (x_k^* - x_k-1^*))
-
-                # Interpolate to find mid-point sample
-                # For simplicity, using nearest samples as approximation.
-                # In practice, a polyphase filter bank would be used.
-
-                # Current symbol sample
-                x_k_idx = int(idx)
-                if x_k_idx + self.sps_in // 2 >= num_samples:  # Ensure enough samples for x_k-1/2, x_k
-                    break
-
-                x_k_minus_half_idx = int(idx + self.sps_in / 2)
-
-                # Make sure indices are within bounds
-                if x_k_minus_half_idx < num_samples and x_k_idx < num_samples:
-                    x_k = current_pol_data[x_k_idx]
-                    x_k_minus_half = current_pol_data[x_k_minus_half_idx]  # This is actually x_k+0.5
-
-                    # Previous symbol's full sample (for the error calculation)
-                    # We need the previous symbol value, and current symbol value.
-                    # The error depends on the mid-point sample and the difference of adjacent full-rate samples.
-                    # e = real(x_mid * (conj(x_k) - conj(x_k-1)))
-                    # Let's adjust for correct indices:
-                    # x_k = symbol at index idx
-                    # x_k_minus_1 = symbol at index idx - sps_in
-                    # x_mid = symbol at index idx - sps_in / 2
-
-                    if idx >= self.sps_in:  # Ensure we have x_k-1 sample
-                        x_prev_idx = int(idx - self.sps_in)
-                        x_mid_idx = int(idx - self.sps_in // 2)
-
-                        if x_prev_idx >= 0 and x_mid_idx >= 0:
-                            x_k = current_pol_data[x_k_idx]
-                            x_prev_k = current_pol_data[x_prev_idx]
-                            x_mid_k = current_pol_data[x_mid_idx]
-
-                            error = (x_mid_k * (x_k.conj() - x_prev_k.conj())).real
-
-                            # Loop filter (Proportional + Integral)
-                            prop = error
-                            integral += error
-
-                            # Update timing phase (fractional part)
-                            timing_phase += self.gardner_loop_filter_gain * (prop + integral)
-
-                            # Wrap timing phase to [0, sps_in)
-                            timing_phase %= self.sps_in
-
-                            # Take symbol sample
-                            symbols_per_pol.append(x_k)  # Take the symbol at current idx
-
-                            # Advance index by 1 symbol interval (sps_in samples)
-                            # adjusted by timing_phase
-                            idx += self.sps_in - timing_phase
-
-                        else:
-                            idx += 1  # Advance if not enough samples
-                    else:
-                        idx += 1  # Advance if not enough samples
-                else:
-                    break
-            output_symbols.append(np.array(symbols_per_pol))
-
-        # Pad shorter polarization if needed (shouldn't happen with proper input)
-        max_len = max(len(s) for s in output_symbols)
-        padded_symbols = np.array([np.pad(s, (0, max_len - len(s)), "constant") for s in output_symbols])
-
-        return padded_symbols
+            # 解卷绕相位 (Unwrap) 避免突变
+            phases = np.unwrap(np.array(phases) * 2 * np.pi) / (2 * np.pi)
+            return phases
 
     def forward(self, signal: Signal) -> Signal:
         """
-        对信号执行定时同步。
+        对信号执行 Oerder-Meyer 前馈定时同步。
 
         Parameters
         ----------
         signal : Signal
-            输入的信号。数据形状为 (n_pol, N_samples)。
-            预期 `signal.ctx.sps` 为 `sps_in`。
+            输入的信号。预期 `signal.ctx.sps` 为 `sps_in`。
 
         Returns
         -------
         Signal
-            定时同步后的符号信号。数据形状为 (n_pol, N_symbols)。
-            `signal.ctx.sps` 将更新为 1。
+            定时同步后的符号信号。`signal.ctx.sps` 将更新为 1。
         """
         if signal.ctx.sps != self.sps_in:
-            raise ValueError(
-                f"Input signal sps ({signal.ctx.sps}) does not match TimingRecovery's expected sps_in ({self.sps_in})."
-            )
+            raise ValueError(f"Expected sps {self.sps_in}, got {signal.ctx.sps}")
 
-        synced_symbols_data = self._gardner_timing_recovery(signal.data)
+        n_pol, n_samples = signal.data.shape
+        synced_list = []
 
-        new_ctx = SignalContext(
-            sample_rate=signal.ctx.sym_rate,  # New sample rate is symbol rate
-            center_freq=signal.ctx.center_freq,
-            n_pol=signal.ctx.n_pol,
-            sps=1,  # After timing recovery, 1 sample per symbol
-            sym_rate=signal.ctx.sym_rate,
-            bits_per_symbol=signal.ctx.bits_per_symbol,
-            is_ofdm=signal.ctx.is_ofdm,
-            meta={**(signal.ctx.meta or {}), "timing_recovered": True},
-        )
-        return Signal(data=synced_symbols_data, ctx=new_ctx)
+        for p in range(n_pol):
+            pol_data = signal.data[p]
+
+            # 1. 估计相位
+            phases = self._estimate_phase(pol_data)
+
+            # 2. 构建重采样时刻序列
+            # phase 是相对于符号起始位置的偏移 [0, 1)
+            num_symbols = n_samples // self.sps_in
+
+            if len(phases) == 1:
+                # 全局单一相位
+                # 理想采样点在：n * sps + phase * sps
+                sample_instants = np.arange(num_symbols) * self.sps_in + phases[0] * self.sps_in
+            else:
+                # 分块插值相位
+                # 将块相位映射到每个符号上
+                xp = np.linspace(0, num_symbols, len(phases))
+                interp_phase = np.interp(np.arange(num_symbols), xp, phases)
+                sample_instants = np.arange(num_symbols) * self.sps_in + interp_phase * self.sps_in
+
+            # 限制范围，防止插值越界
+            sample_instants = np.clip(sample_instants, 0, n_samples - 1)
+
+            # 3. 插值重采样 (使用三次样条插值)
+            f_interp = interp1d(np.arange(n_samples), pol_data, kind="cubic", fill_value="extrapolate")
+            synced_pol = f_interp(sample_instants)
+            synced_list.append(synced_pol)
+
+        # 保持长度一致
+        min_len = min(len(s) for s in synced_list)
+        output_data = np.array([s[:min_len] for s in synced_list])
+
+        new_ctx = signal.ctx.copy()
+        new_ctx.sps = 1
+        new_ctx.sample_rate = signal.ctx.sym_rate
+        new_ctx.meta["timing_method"] = "Oerder-Meyer"
+
+        return Signal(data=output_data.astype(np.complex64), ctx=new_ctx)
 
 
 class FOCoarse(BaseBlock):
