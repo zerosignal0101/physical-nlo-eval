@@ -270,3 +270,67 @@ class CommonPhaseNoiseCompensate(BaseBlock):
             meta=meta,  # Use the potentially updated meta dictionary
         )
         return Signal(data=compensated_data, ctx=new_ctx)
+
+
+class OFDMToSymbolStream(BaseBlock):
+    """OFDM 频域格式 → 流格式转换模块。
+
+    将 OFDM 解调后的频域信号 (n_pol, n_sub, n_sym) 转换为流格式
+    (n_pol, n_sym * n_sub)，以适配 Demapper 的输入期望。
+
+    此模块应置于 CommonPhaseNoiseCompensate 之后使用，因为 CPE 需要在
+    (n_pol, n_sub, n_sym) 格式上进行逐符号处理。
+
+    Parameters
+    ----------
+    data_indices : np.ndarray | None, optional
+        数据子载波索引。如果为 None，则包含所有子载波。
+    """
+
+    def __init__(self, data_indices: np.ndarray | None = None) -> None:
+        """初始化 OFDMToSymbolStream。"""
+        super().__init__(name="OFDMToSymbolStream")
+        self.data_indices = data_indices
+
+    def forward(self, signal: Signal) -> Signal:
+        """将 OFDM 频域信号转换为 QAM 流格式。
+
+        Parameters
+        ----------
+        signal : Signal
+            输入的 OFDM 频域信号。数据形状为 (n_pol, n_sub, n_sym)。
+
+        Returns
+        -------
+        Signal
+            QAM 流格式信号。数据形状为 (n_pol, n_sym * n_sub)。
+            `signal.ctx.sps` 保持不变。
+        """
+        if not signal.ctx.is_ofdm:
+            raise ValueError("OFDMToQAMStream only supports OFDM signal.")
+        if signal.data.ndim != 3:
+            raise ValueError("Input signal data must be 3D (n_pol, n_sub, n_sym).")
+
+        n_pol = signal.data.shape[0]
+
+        if self.data_indices is not None:
+            # 仅保留数据子载波
+            output_data = signal.data[:, self.data_indices, :].transpose(0, 2, 1).reshape(n_pol, -1)
+        else:
+            # 包含所有子载波
+            output_data = signal.data.transpose(0, 2, 1).reshape(n_pol, -1)
+
+        new_ctx = SignalContext(
+            sample_rate=signal.ctx.sample_rate,
+            center_freq=signal.ctx.center_freq,
+            n_pol=n_pol,
+            sps=signal.ctx.sps,
+            sym_rate=signal.ctx.sym_rate,
+            bits_per_symbol=signal.ctx.bits_per_symbol,
+            is_ofdm=False,  # 转换后不再是 OFDM 格式
+            meta={
+                **(signal.ctx.meta or {}),
+                "ofdm_to_qam_converted": True,
+            },
+        )
+        return Signal(data=output_data.astype(np.complex64), ctx=new_ctx)

@@ -15,8 +15,9 @@ import numpy as np
 
 from physics_nlo_eval.channel.fiber import EDFA, FiberChannel
 from physics_nlo_eval.core.signal import Signal, SignalContext
-from physics_nlo_eval.dsp.freq_domain import CommonPhaseNoiseCompensate, OFDM_Demodulator
+from physics_nlo_eval.dsp.freq_domain import CommonPhaseNoiseCompensate, OFDM_Demodulator, OFDMToSymbolStream
 from physics_nlo_eval.dsp.time_domain import ChromaticDispersionComp
+from physics_nlo_eval.metrics.ber_evm import Demapper
 from physics_nlo_eval.tx.mapper import Mapper
 from physics_nlo_eval.tx.ofdm import WindowedOFDMModulator
 from physics_nlo_eval.tx.optics import IQModulator
@@ -88,7 +89,7 @@ def make_signal_context(
 
 
 def add_awgn_to_signal(signal: Signal, eb_n0_db: float, bits_per_symbol: int) -> Signal:
-    """对 OFDM 信号添加 AWGN，使用信号功率作为 Eb 参考。
+    """对 OFDM 信号添加 AWGN，使用信号功率作为 Eb 参考.
 
     注意：这里使用 OFDM 信号的功率（而非放大后的功率）来校准噪声，
     使得 Eb/N0 直接对应 OFDM 符号层面的信噪比。
@@ -127,6 +128,7 @@ def test_wofdm_fiber(
     n_pol_tx = 2 if "DP-" in modulation else 1
     sym_rate = SYM_RATE_GBD * 1e9
     mapper = Mapper(modulation=modulation, power_norm=True, sym_rate=sym_rate)
+    demapper = Demapper(modulation=modulation, power_norm=True)
     modulator = WindowedOFDMModulator(
         n_subcarriers=N_SUBCARRIERS,
         cp_len=CP_LEN,
@@ -154,7 +156,7 @@ def test_wofdm_fiber(
     print(f"  总比特: {total_bits}, n_pol={n_pol_tx}")
 
     # 转换为光信号
-    iq_mod = IQModulator(optical_power_per_pol_mw=10 ** (OPTICAL_POWER_DBM / 10))
+    iq_mod = IQModulator(launch_power_dbm_per_pol=OPTICAL_POWER_DBM)
     optical_signal = iq_mod.forward(ofdm_signal)
 
     # 扩展为双偏振 (FiberChannel 需要)
@@ -223,41 +225,15 @@ def test_wofdm_fiber(
     cpe = CommonPhaseNoiseCompensate(method="pilot_assisted")
     rx_fd_comp = cpe.forward(rx_fd)
 
-    # ---- 逐子载波 BER ----
-    # Note: FiberChannel pads SP to DP internally, so rx_fd_comp.ctx.n_pol=2
-    # but actual TX was n_pol_tx=1. Use n_pol_tx for BER computation.
-    constellation = mapper.constellation.lut
-    powers_of_two = 1 << np.arange(bits_per_symbol - 1, -1, -1)
+    # ---- BER 计算 ----
+    # 使用 OFDMToSymbolStream 进行格式转换，然后使用 Demapper 计算 BER
+    ofdm_reshape = OFDMToSymbolStream()
+    rx_fd_reshaped = ofdm_reshape.forward(rx_fd_comp)
+    rx_signal = Signal(data=rx_fd_reshaped.data, ctx=rx_fd_reshaped.ctx)
+    rx_bits = demapper.forward(rx_signal)
 
-    sc_errors = np.zeros((n_pol_tx, N_SUBCARRIERS), dtype=np.int64)
-    sc_bits = np.zeros((n_pol_tx, N_SUBCARRIERS), dtype=np.int64)
-
-    for p in range(n_pol_tx):
-        # Mapper uses bit-level split: bits[0::2] -> pol 0, bits[1::2] -> pol 1
-        tx_bits_pol = tx_bits[p::2] if n_pol_tx == 2 else tx_bits
-
-        for sc in range(N_SUBCARRIERS):
-            sc_symbols = rx_fd_comp.data[p, sc, :]
-
-            distances = np.abs(sc_symbols[:, np.newaxis] - constellation[np.newaxis, :])
-            decision_idx = np.argmin(distances, axis=1)
-            rx_sc_bits = ((decision_idx[:, np.newaxis] & powers_of_two) > 0).flatten()
-
-            # TX bits for this subcarrier (F-order grid: row=sc, col=t → flat idx = sc + t*n_sub)
-            sc_tx_bits = np.zeros(len(sc_symbols) * bits_per_symbol, dtype=bool)
-            for fi in range(NUM_FRAMES):
-                for t in range(NUM_DATA_SYMBOLS_PER_FRAME):
-                    qam_sym = fi * payload_per_frame + sc + t * N_SUBCARRIERS
-                    sym_bits = tx_bits_pol[qam_sym * bits_per_symbol : (qam_sym + 1) * bits_per_symbol]
-                    pos = (fi * NUM_DATA_SYMBOLS_PER_FRAME + t) * bits_per_symbol
-                    sc_tx_bits[pos : pos + bits_per_symbol] = sym_bits
-
-            errors = np.sum(rx_sc_bits != sc_tx_bits[: len(rx_sc_bits)])
-            sc_errors[p, sc] = errors
-            sc_bits[p, sc] = len(rx_sc_bits)
-
-    total_errors = np.sum(sc_errors)
-    total_bits = np.sum(sc_bits)
+    total_errors = np.sum(tx_bits != rx_bits)
+    total_bits = len(tx_bits)
     measured_ber = total_errors / total_bits
 
     if "QPSK" in modulation:
@@ -267,21 +243,12 @@ def test_wofdm_fiber(
 
     ratio = measured_ber / theoretical_ber if theoretical_ber > 0 else float("inf")
 
-    # 打印结果 (前 4 + 后 4 个子载波，每极化)
-    print(f"\n  {'Sub':>5} {'Pol':>4} {'Errors':>10} {'Bits':>10} {'BER':>12} {'Ratio':>8}")
-    print(f"  {'-' * 55}")
-    show_sc = list(range(4)) + list(range(N_SUBCARRIERS - 4, N_SUBCARRIERS))
-    for sc in show_sc:
-        for p in range(n_pol_tx):
-            sc_ber = sc_errors[p, sc] / sc_bits[p, sc] if sc_bits[p, sc] > 0 else 0.0
-            r = sc_ber / theoretical_ber if theoretical_ber > 0 else float("inf")
-            print(f"  {sc:>5} {p:>4} {sc_errors[p, sc]:>10} {sc_bits[p, sc]:>10} {sc_ber:>12.2e} {r:>8.2f}")
-
-    print(f"\n  {'Global':>5} {'--':>4} {total_errors:>10} {total_bits:>10} {measured_ber:>12.2e} {ratio:>8.2f}")
-    print(f"  理论 BER: {theoretical_ber:.2e}")
+    print(f"\n  测量 BER: {measured_ber:.4e}")
+    print(f"  理论 BER: {theoretical_ber:.4e}")
+    print(f"  BER ratio: {ratio:.2f}")
     print(f"  {'[PASS]' if ratio < 5.0 else '[WARN]'} BER ratio: {ratio:.2f}")
 
-    return measured_ber, theoretical_ber, sc_errors, sc_bits
+    return measured_ber, theoretical_ber
 
 
 def run_all_tests():
@@ -306,7 +273,7 @@ def run_all_tests():
 
         results = []
         for eb_n0_db in [10, 12, 14, 16]:
-            measured_ber, theoretical_ber, _, _ = test_wofdm_fiber(
+            measured_ber, theoretical_ber = test_wofdm_fiber(
                 modulation="DP-16QAM",
                 fiber_length_km=80.0,
                 eb_n0_db=eb_n0_db,
@@ -335,7 +302,7 @@ def run_all_tests():
         # globals()["NUM_FRAMES"] = 100
 
         # for eb_n0_db in [10, 12, 14, 16]:
-        #     measured_ber, theoretical_ber, _, _ = test_wofdm_fiber(
+        #     measured_ber, theoretical_ber = test_wofdm_fiber(
         #         modulation="SP-16QAM",
         #         fiber_length_km=80.0,
         #         eb_n0_db=eb_n0_db,

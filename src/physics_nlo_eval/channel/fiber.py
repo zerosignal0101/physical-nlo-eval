@@ -333,12 +333,13 @@ class EDFA(BaseBlock):
         # Or a specific optical filter bandwidth. Let's use sample_rate for now.
         noise_bandwidth = opt_signal.ctx.sample_rate  # Hz (electrical bandwidth)
 
-        # For our scale (signal power in mW), let's estimate noise power in mW.
+        # For our scale (signal power in W), let's estimate noise power in W.
         noise_variance_per_sample = (
-            0.5 * self.nf_linear * self.gain_linear * h * nu * noise_bandwidth * 1e3
-        )  # Convert to mW unit
+            0.5 * self.nf_linear * self.gain_linear * h * nu * noise_bandwidth
+        )  # Noise power in W
         # Divide by 2 because complex noise has real and imaginary parts
-        noise_std_dev = np.sqrt(noise_variance_per_sample / 2)
+        # and we want std dev (sqrt of variance) for each component
+        noise_std_dev = np.sqrt(noise_variance_per_sample / 2)  # sqrt(W)
 
         # Generate complex Gaussian noise
         ase_noise = (

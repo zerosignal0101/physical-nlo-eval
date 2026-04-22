@@ -3,7 +3,7 @@
 import numpy as np
 
 from physics_nlo_eval.core.signal import Signal, SignalContext
-from physics_nlo_eval.dsp.freq_domain import OFDM_Demodulator
+from physics_nlo_eval.dsp.freq_domain import OFDM_Demodulator, OFDMToSymbolStream
 from physics_nlo_eval.metrics.ber_evm import Demapper
 from physics_nlo_eval.tx.mapper import Mapper
 from physics_nlo_eval.tx.ofdm import OFDMModulator, WindowedOFDMModulator
@@ -61,16 +61,6 @@ def make_signal_context(
         is_ofdm=False,
         meta=None,
     )
-
-
-def fd_to_qam_stream(rx_fd_data: np.ndarray, data_indices: np.ndarray | None = None) -> np.ndarray:
-    """将 OFDM 频域输出转为 QAM 比特流顺序。"""
-    n_pol, n_sub, n_ofdm = rx_fd_data.shape
-    if data_indices is None:
-        return rx_fd_data.transpose(0, 2, 1).reshape(n_pol, -1)
-    else:
-        rx_fd_grid = rx_fd_data[:, data_indices, :].reshape(n_pol, len(data_indices), n_ofdm)
-        return rx_fd_grid.transpose(0, 2, 1).reshape(n_pol, -1)
 
 
 # ============================================================================
@@ -139,14 +129,10 @@ def test_wofdm_modem_roundtrip(
 
     print(f"  解调后形状: {rx_fd.data.shape}")
 
-    data_indices = modulator.data_indices if pilot_spacing > 0 else None
-    rx_qam = fd_to_qam_stream(rx_fd.data, data_indices)
+    ofdm_reshape = OFDMToSymbolStream(modulator.data_indices if pilot_spacing > 0 else None)
+    rx_fd_reshaped = ofdm_reshape.forward(rx_fd)
 
-    rx_qam_signal = Signal(
-        data=rx_qam,
-        ctx=make_signal_context(n_pol=n_pol, bits_per_symbol=bits_per_symbol),
-    )
-    rx_bits = demapper.forward(rx_qam_signal)
+    rx_bits = demapper.forward(rx_fd_reshaped)
 
     bit_errors = np.sum(tx_bits != rx_bits)
     ber = bit_errors / total_bits
@@ -223,23 +209,17 @@ def test_wofdm_vs_ofdm_roundtrip(
     # Standard OFDM round-trip
     ofdm_signal = ofdm_mod.forward(tx_signal)
     ofdm_rx_fd = ofdm_demod.forward(ofdm_signal)
-    ofdm_rx_qam = fd_to_qam_stream(ofdm_rx_fd.data, None)
-    ofdm_rx_signal = Signal(
-        data=ofdm_rx_qam,
-        ctx=make_signal_context(n_pol=n_pol, bits_per_symbol=bits_per_symbol),
-    )
-    ofdm_rx_bits = demapper.forward(ofdm_rx_signal)
+    ofdm_reshape = OFDMToSymbolStream()
+    ofdm_rx_fd_reshaped = ofdm_reshape.forward(ofdm_rx_fd)
+    ofdm_rx_bits = demapper.forward(ofdm_rx_fd_reshaped)
     ofdm_errors = np.sum(tx_bits != ofdm_rx_bits)
 
     # Windowed OFDM round-trip
     wofdm_signal = wofdm_mod.forward(tx_signal)
     wofdm_rx_fd = wofdm_demod.forward(wofdm_signal)
-    wofdm_rx_qam = fd_to_qam_stream(wofdm_rx_fd.data, None)
-    wofdm_rx_signal = Signal(
-        data=wofdm_rx_qam,
-        ctx=make_signal_context(n_pol=n_pol, bits_per_symbol=bits_per_symbol),
-    )
-    wofdm_rx_bits = demapper.forward(wofdm_rx_signal)
+    wofdm_reshape = OFDMToSymbolStream()
+    wofdm_rx_fd_reshaped = ofdm_reshape.forward(wofdm_rx_fd)
+    wofdm_rx_bits = demapper.forward(wofdm_rx_fd_reshaped)
     wofdm_errors = np.sum(tx_bits != wofdm_rx_bits)
 
     print(f"  子载波: {n_subcarriers}, CP: {cp_len}, CS: {wofdm_mod.cs_len}, beta: {beta}")
@@ -329,13 +309,9 @@ def test_wofdm_awgn_ber(
 
         # OFDM 解调
         rx_fd = demodulator.forward(rx_signal)
-        rx_qam = fd_to_qam_stream(rx_fd.data, data_indices)
-
-        rx_qam_signal = Signal(
-            data=rx_qam,
-            ctx=make_signal_context(n_pol=n_pol, bits_per_symbol=bits_per_symbol),
-        )
-        rx_bits = demapper.forward(rx_qam_signal)
+        ofdm_reshape = OFDMToSymbolStream(data_indices)
+        rx_fd_reshaped = ofdm_reshape.forward(rx_fd)
+        rx_bits = demapper.forward(rx_fd_reshaped)
 
         batch_errors = np.sum(tx_bits != rx_bits)
         total_errors += batch_errors
