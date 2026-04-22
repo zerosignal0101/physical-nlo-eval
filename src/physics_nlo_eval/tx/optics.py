@@ -7,50 +7,48 @@ from physics_nlo_eval.core.signal import Signal, SignalContext
 
 
 class IQModulator(BaseBlock):
-    """IQ 调制器，将基带电信号转换为光信号。
+    """IQ 调制器，将归一化数字基带信号转换为具有物理功率的光信号。
 
-    模拟理想的马赫曾德调制器 (Mach-Zehnder Modulator) 组合。
+    PyNLO 的 Manakov 方程要求输入信号振幅单位为 sqrt(W)。
+    此模块假设输入数字信号的平均功率为 1，将其缩放至指定的发射功率。
 
     Parameters
     ----------
-    optical_power_per_pol_mw : float
-        每个偏振的输出光功率 (毫瓦)。
-        用于归一化输出光信号的幅度。
+    launch_power_dbm_per_pol : float
+        每个偏振的发射光功率。
+        对于 DP 信号，总功率是该值的 2 倍。
+        合理范围通常为 -5 ~ 5 dBm (对应 0.3 ~ 3 mW)。
     wavelength_nm : float
         激光器的中心波长 (纳米)。
     """
 
     def __init__(
         self,
-        optical_power_per_pol_mw: float = 10.0,
+        launch_power_dbm_per_pol: float = 0.0,  # 默认 0 dBm = 1 mW
         wavelength_nm: float = 1550.0,
     ) -> None:
         """初始化 IQModulator。"""
         super().__init__(name="IQModulator")
-        self.optical_power_per_pol_mw = optical_power_per_pol_mw
+        self.launch_power_dbm_per_pol = launch_power_dbm_per_pol
         self.wavelength_nm = wavelength_nm
 
         # Constants
         self.c = 2.99792458e8  # Speed of light (m/s)
-        self.h = 6.62607015e-34  # Planck's constant (J·s)
 
     def forward(self, electrical_signal: Signal) -> Signal:
         """
-        将基带电信号转换为光信号。
-
-        假设输入 `electrical_signal` 为理想的复数基带电信号，
-        其幅度已经代表了光场的复数包络。
+        将基带电信号转换为物理单位的光信号包络。
 
         Parameters
         ----------
         electrical_signal : Signal
-            输入的基带电信号。数据形状为 (n_pol, N_samples)。
+            输入的归一化基带电信号。期望平均功率约为 1。
 
         Returns
         -------
         Signal
-            输出的光信号。数据形状为 (n_pol, N_samples)。
-            SignalContext 会更新 center_freq 为光载波频率。
+            输出的光信号。振幅单位为 sqrt(W)，可直接输入 FiberChannel。
+            SignalContext 会更新 center_freq 和 meta 中的功率信息。
         """
         if electrical_signal.data.ndim != 2:
             raise ValueError("Electrical signal data must be 2D (n_pol, N_samples).")
@@ -58,46 +56,25 @@ class IQModulator(BaseBlock):
             raise ValueError("Electrical signal data must be complex for IQ modulation.")
 
         n_pol = electrical_signal.ctx.n_pol
-        num_samples = electrical_signal.num_samples
 
-        # 确保偏振数量匹配
-        if n_pol != electrical_signal.data.shape[0]:
-            raise ValueError(
-                f"SignalContext n_pol ({n_pol}) does not match data shape ({electrical_signal.data.shape[0]})."
-            )
+        # 1. 计算目标线性功率
+        # P_linear(W) = 10^(P_dBm/10) * 1e-3
+        target_power_per_pol_w = 10 ** (self.launch_power_dbm_per_pol / 10) * 1e-3
+        amplitude_scale = np.sqrt(target_power_per_pol_w)
 
-        # 计算光子能量和对应幅度归一化因子
-        # 1 mW = 1e-3 J/s
-        # P = |E|^2 / (2 * Z_0)
-        # 这里我们假设 E 是光场复振幅，我们关注的是其归一化的功率，
-        # 并将其归一化到期望的 mW 级别。
-        # 如果 electrical_signal.data 的平均功率为 1，则输出光信号的平均功率为 optical_power_per_pol_mw。
+        # 2. 归一化输入信号至单位平均功率，然后缩放至目标功率
+        # 这确保了无论前端 Mapper 输出功率是否严格为1，物理功率都准确
         current_avg_power = np.mean(np.abs(electrical_signal.data) ** 2, axis=1, keepdims=True)
-        # Avoid division by zero for zero-power signals
-        current_avg_power[current_avg_power == 0] = 1.0
+        current_avg_power[current_avg_power == 0] = 1.0  # 防止除零
 
-        # Scale factor to achieve desired optical power
-        # target_power_linear = self.optical_power_per_pol_mw * 1e-3  # Convert mW to Watts
-        # optical_field = electrical_signal.data * np.sqrt(target_power_linear / current_avg_power)
-        # ^ This is for average power. Peak power might be different.
-        # For simplicity, let's normalize the signal so its average power in the simulation units
-        # corresponds to the optical_power_per_pol_mw.
-        # If 'data' is already normalized to avg power 1 by Mapper, then just scale by sqrt(power_mW).
+        # 物理光场 E_phys = E_digital * sqrt(P_target / P_digital_avg)
+        optical_field = electrical_signal.data * (amplitude_scale / np.sqrt(current_avg_power))
 
-        # A_eff is usually 80 um^2 for SMF, n_eff ~ 1.45
-        # The relationship between field amplitude |E| and power P is P = 0.5 * n_eff * epsilon_0 * c * |E|^2 * A_eff
-        # This is for converting Pynlo units.
-        # Here, we simplify to scale the input electrical field to achieve the desired optical power.
-        # Assuming electrical_signal.data is already average power normalized to 1 by Mapper.
-        # So, we just scale it by sqrt(power_mW_per_pol).
-        scale_factor = np.sqrt(self.optical_power_per_pol_mw)  # In mW, for Pynlo compatibility
-        optical_field = electrical_signal.data * scale_factor
-
-        # 更新 SignalContext
+        # 3. 更新 SignalContext
         optical_center_freq = self.c / (self.wavelength_nm * 1e-9)  # Hz
         new_ctx = SignalContext(
             sample_rate=electrical_signal.ctx.sample_rate,
-            center_freq=optical_center_freq,  # 光载波频率
+            center_freq=optical_center_freq,  # 光载波绝对频率
             n_pol=n_pol,
             sps=electrical_signal.ctx.sps,
             sym_rate=electrical_signal.ctx.sym_rate,
@@ -105,11 +82,13 @@ class IQModulator(BaseBlock):
             is_ofdm=electrical_signal.ctx.is_ofdm,
             meta={
                 **(electrical_signal.ctx.meta or {}),
-                "tx_optical_power_per_pol_mw": self.optical_power_per_pol_mw,
+                "tx_launch_power_dbm_per_pol": self.launch_power_dbm_per_pol,
                 "tx_wavelength_nm": self.wavelength_nm,
+                "tx_power_per_pol_w": target_power_per_pol_w,
             },
         )
-        return Signal(data=optical_field.astype(np.complex64), ctx=new_ctx)
+        # 保留复数精度，以匹配光纤仿真的需求
+        return Signal(data=optical_field.astype(np.complex128), ctx=new_ctx)
 
 
 class PolarizationMultiplexer(BaseBlock):

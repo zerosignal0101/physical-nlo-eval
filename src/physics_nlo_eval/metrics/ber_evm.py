@@ -83,6 +83,11 @@ class Demapper(BaseBlock):
         """极速解映射：判决 + 向量化位运算解包。"""
         cst = self.constellation
 
+        # 将输入物理信号功率拉回到理想星座图的归一化功率水平
+        avg_power = np.mean(np.abs(payload_symbols) ** 2)
+        if avg_power > 0:
+            payload_symbols = payload_symbols / np.sqrt(avg_power)
+
         # 欧氏距离判决
         distances = np.abs(payload_symbols[:, np.newaxis] - cst.lut[np.newaxis, :])
         decision_indices = np.argmin(distances, axis=1)
