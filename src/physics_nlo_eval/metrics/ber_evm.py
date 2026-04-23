@@ -186,16 +186,24 @@ class BERCalculator:
             return 0.0  # Avoid division by zero
         return num_errors / total_bits
 
-    def calculate_evm(self, tx_symbols: np.ndarray, rx_symbols: np.ndarray) -> float:
-        """
-        计算误差矢量幅度 (EVM)。
+    def calculate_evm(
+        self,
+        rx_symbols: np.ndarray,
+        constellation_symbols: np.ndarray,
+        constellation_indices: np.ndarray | None = None,
+    ) -> float:
+        """计算误差矢量幅度 (EVM)。
+
+        EVM 衡量接收信号相对于理想星座点的偏差。
 
         Parameters
         ----------
-        tx_symbols : np.ndarray
-            发送的理想星座点符号。
         rx_symbols : np.ndarray
-            接收到的实际符号 (判决前)。
+            接收到的实际符号，形状为 (n_pol, n_symbols) 或 (n_pol, n_subcarriers, n_symbols)。
+        constellation_symbols : np.ndarray
+            归一化后的理想星座点数组，形状为 (n_constellation_points,)。
+        constellation_indices : np.ndarray | None
+            每个接收符号对应的理想星座点索引，用于从 constellation_symbols 中查找理想点。
 
         Returns
         -------
@@ -205,38 +213,68 @@ class BERCalculator:
         Raises
         ------
         ValueError
-            如果发送和接收符号流的长度不匹配。
+            如果 rx_symbols 和 constellation_indices 长度不匹配。
         """
-        if tx_symbols.shape != rx_symbols.shape:
-            raise ValueError(f"TX symbols shape {tx_symbols.shape} does not match RX symbols shape {rx_symbols.shape}.")
+        # Reshape rx_symbols to (n_pol, -1) for easier processing
+        if rx_symbols.ndim == 3:
+            # OFDM: (n_pol, n_subcarriers, n_symbols) -> (n_pol, n_subcarriers * n_symbols)
+            rx_flat = rx_symbols.reshape(rx_symbols.shape[0], -1)
+        elif rx_symbols.ndim == 2:
+            rx_flat = rx_symbols.reshape(rx_symbols.shape[0], -1)
+        else:
+            raise ValueError(f"rx_symbols must be 2D or 3D, got {rx_symbols.ndim}D")
 
-        # Apply ignore_headers (for symbols)
-        # Assuming ignore_headers is in terms of symbols here.
+        n_pol, n_total_symbols = rx_flat.shape
+
+        # Apply ignore_headers
         start_idx = self.ignore_headers
-        if start_idx >= tx_symbols.shape[1]:  # If flat_symbols are (N_pol, N_symbols)
+        if start_idx >= n_total_symbols:
             return 0.0
 
-        # If data is (n_pol, N_symbols) or (n_pol, N_subcarriers, N_symbols)
-        if tx_symbols.ndim == 3:  # OFDM
-            tx_symbols_cropped = tx_symbols[:, :, start_idx:]
-            rx_symbols_cropped = rx_symbols[:, :, start_idx:]
-        else:  # Single-carrier
-            tx_symbols_cropped = tx_symbols[:, start_idx:]
-            rx_symbols_cropped = rx_symbols[:, start_idx:]
+        rx_cropped = rx_flat[:, start_idx:]
 
-        # Ensure tx_symbols are constellation points (normalized)
+        # Normalize rx_symbols to unit power to match normalized constellation
+        rx_power = np.mean(np.abs(rx_cropped) ** 2, axis=1, keepdims=True)
+        rx_power[rx_power == 0] = 1.0  # Avoid division by zero
+        rx_cropped_normalized = rx_cropped / np.sqrt(rx_power)
+
+        if constellation_indices is not None:
+            # Use the provided indices to get ideal constellation points
+            indices_cropped = constellation_indices[start_idx:].flatten()
+            n_symbols_expected = rx_cropped.shape[1]
+
+            if len(indices_cropped) == n_symbols_expected:
+                # indices length matches n_symbols: same index for all pols at each time slot
+                ideal_symbols = constellation_symbols[indices_cropped]  # (n_symbols,)
+                # Expand to (n_pol, n_symbols)
+                ideal_cropped = np.repeat(ideal_symbols[np.newaxis, :], n_pol, axis=0)
+            elif len(indices_cropped) == n_symbols_expected * n_pol:
+                # indices are interleaved: [pol0_t0, pol1_t0, pol0_t1, pol1_t1, ...]
+                if n_pol == 2:
+                    ideal_pol0 = constellation_symbols[indices_cropped[0::2]]
+                    ideal_pol1 = constellation_symbols[indices_cropped[1::2]]
+                    ideal_cropped = np.vstack([ideal_pol0, ideal_pol1])
+                else:
+                    raise ValueError(f"Interleaved indices only supported for n_pol=2, got {n_pol}")
+            else:
+                raise ValueError(
+                    f"constellation_indices length {len(indices_cropped)} does not match "
+                    f"rx_symbols cropped length {n_symbols_expected} (n_pol={n_pol})"
+                )
+        else:
+            # No indices provided - assume rx_symbols already aligned with constellation
+            ideal_cropped = rx_cropped_normalized  # Fallback, will give zero EVM
+
         # EVM = sqrt(P_error / P_signal) * 100%
-        # P_error = sum(|rx_symbol - tx_symbol|**2)
-        # P_signal = sum(|tx_symbol|**2)
+        # P_error = mean(|rx - ideal|^2)
+        # P_signal = mean(|ideal|^2) - normalized constellation should have P_signal = 1
 
-        error_vectors = rx_symbols_cropped - tx_symbols_cropped
-
+        error_vectors = rx_cropped_normalized - ideal_cropped
         p_error = np.mean(np.abs(error_vectors) ** 2)
-        p_signal = np.mean(np.abs(tx_symbols_cropped) ** 2)
+        p_signal = np.mean(np.abs(ideal_cropped) ** 2)
 
-        if p_signal <= 1e-12:  # Avoid division by zero
+        if p_signal <= 1e-12:
             return np.inf
 
         evm = np.sqrt(p_error / p_signal) * 100  # Convert to percentage
-
         return evm
