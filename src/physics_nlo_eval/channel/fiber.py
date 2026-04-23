@@ -364,3 +364,215 @@ class EDFA(BaseBlock):
             },
         )
         return Signal(data=output_signal_data, ctx=new_ctx)
+
+
+class IdealAmplifier(BaseBlock):
+    """理想光放大器 - 按入纤功率恢复信号电平并添加ASE噪声。
+
+    自动从信号的 meta 中读取 IQModulator 存储的入纤功率 (tx_launch_power_dbm_per_pol)，
+    将信号放大恢复到该功率电平。对于 WDM 堆叠信号，逐通道恢复各自的人纤功率。
+
+    与 ISRS-GN 模型 (network-nlo-eval) 保持同步，使用相同的 ASE 噪声计算公式：
+    P_ASE = nf * h * nu * B * (G - 1)
+
+    Parameters
+    ----------
+    nf_db : float
+        放大器的噪声系数 (dB)。默认为 5.5 dB (C-band EDFA 典型值)。
+    default_power_dbm : float | None
+        默认入纤功率 (dBm)。当信号 meta 中没有存储入纤功率时使用。
+        默认为 None，此时如果缺少入纤功率信息将报错。
+    """
+
+    def __init__(self, nf_db: float = 5.5, default_power_dbm: float | None = None) -> None:
+        """初始化 IdealAmplifier。"""
+        super().__init__(name=f"IdealAmplifier(NF={nf_db}dB)")
+        self.nf_db = nf_db
+        self.default_power_dbm = default_power_dbm
+        self.nf_linear = 10 ** (nf_db / 10)
+
+    def _get_channel_target_power_w(self, signal: Signal, ch_idx: int, is_stacked_wdm: bool) -> float:
+        """从信号 meta 中提取各通道的目标功率 (入纤功率)。
+
+        Parameters
+        ----------
+        signal : Signal
+            输入信号。
+        ch_idx : int
+            通道索引。
+        is_stacked_wdm : bool
+            是否为堆叠 WDM 信号。
+
+        Returns
+        -------
+        float
+            目标功率 (W, 总功率两个偏振合计)。
+        """
+        if is_stacked_wdm:
+            # 从 wdm_channels_info 中获取各通道的原始上下文
+            wdm_info = signal.ctx.meta.get("wdm_channels_info", [])
+            if wdm_info and len(wdm_info) > ch_idx:
+                original_ctx = wdm_info[ch_idx].get("original_ctx")
+                if original_ctx and original_ctx.meta:
+                    launch_power_dbm = original_ctx.meta.get("tx_launch_power_dbm_per_pol")
+                    if launch_power_dbm is not None:
+                        # per pol 转为总功率 (两个偏振)
+                        return 2 * (1e-3 * 10 ** (launch_power_dbm / 10))
+
+            # 如果堆叠信号没有原始上下文信息，使用顶层 meta
+            launch_power_dbm = signal.ctx.meta.get("tx_launch_power_dbm_per_pol")
+            if launch_power_dbm is not None:
+                return 2 * (1e-3 * 10 ** (launch_power_dbm / 10))
+        else:
+            # 单通道信号
+            launch_power_dbm = signal.ctx.meta.get("tx_launch_power_dbm_per_pol")
+            if launch_power_dbm is not None:
+                return 2 * (1e-3 * 10 ** (launch_power_dbm / 10))
+
+        # 回退到默认功率
+        if self.default_power_dbm is not None:
+            return 2 * (1e-3 * 10 ** (self.default_power_dbm / 10))
+
+        raise ValueError(
+            "IdealAmplifier: 信号 meta 中未找到入纤功率 (tx_launch_power_dbm_per_pol)。"
+            "请确保信号已经过 IQModulator 处理，或在 IdealAmplifier 构造函数中指定 default_power_dbm。"
+        )
+
+    def _get_channel_info(self, signal: Signal) -> tuple[int, bool, list[float], list[float]]:
+        """从信号中提取各通道信息。
+
+        Returns
+        -------
+        tuple
+            (n_channels, is_stacked_wdm, channel_freqs_hz, channel_powers_w)
+        """
+        is_stacked_wdm = signal.ctx.meta.get("is_stacked_wdm_signal", False)
+
+        if is_stacked_wdm:
+            # 堆叠 WDM 信号: (n_channels, n_pol, N_samples)
+            n_channels = signal.data.shape[0]
+            n_pol = signal.data.shape[1]
+
+            # 获取各通道的绝对频率
+            wdm_info = signal.ctx.meta.get("wdm_channels_info", [])
+            if wdm_info and len(wdm_info) == n_channels:
+                # 计算各通道的绝对频率
+                reference_freq = signal.ctx.center_freq  # WDM 参考中心频率
+                channel_freqs = []
+                for ch_info in wdm_info:
+                    freq_offset = ch_info.get("freq_offset_hz", 0.0)
+                    channel_freqs.append(reference_freq + freq_offset)
+            else:
+                # 如果没有 wdm_info，使用等间隔假设
+                channel_bw = signal.ctx.meta.get("original_sample_rate_hz", signal.ctx.sample_rate)
+                total_bw = n_channels * channel_bw
+                start_freq = signal.ctx.center_freq - total_bw / 2
+                channel_freqs = [start_freq + i * channel_bw for i in range(n_channels)]
+
+            # 计算各通道的平均功率 (两个偏振合计)
+            channel_powers = []
+            for ch_idx in range(n_channels):
+                ch_data = signal.data[ch_idx]  # (n_pol, N_samples)
+                power = np.mean(np.abs(ch_data) ** 2) * n_pol  # 总功率 (两个偏振)
+                channel_powers.append(power)
+
+            return n_channels, True, channel_freqs, channel_powers
+        else:
+            # 单通道信号: (n_pol, N_samples) 或宽带 WDM (n_pol, N_samples)
+            n_channels = 1
+            n_pol = signal.data.shape[0]
+
+            # 中心频率作为信号频率
+            channel_freqs = [signal.ctx.center_freq]
+
+            # 计算信号平均功率
+            total_power = np.mean(np.abs(signal.data) ** 2) * n_pol
+            channel_powers = [total_power]
+
+            return n_channels, False, channel_freqs, channel_powers
+
+    def forward(self, opt_signal: Signal) -> Signal:
+        """将信号放大恢复到入纤功率并添加 ASE 噪声。
+
+        Parameters
+        ----------
+        opt_signal : Signal
+            输入的衰减光信号。
+
+        Returns
+        -------
+        Signal
+            输出的放大光信号，包含 ASE 噪声。
+        """
+        if not np.iscomplexobj(opt_signal.data):
+            raise ValueError("Input optical signal must be complex.")
+
+        n_channels, is_stacked_wdm, channel_freqs, channel_powers = self._get_channel_info(opt_signal)
+
+        # 物理常数
+        h = 6.62607015e-34  # Planck's constant (J·s)
+        rs_hz = opt_signal.ctx.sym_rate  # 符号速率 (Hz)
+
+        # 对每个通道计算增益并添加噪声
+        output_data_list = []
+        gains_linear = []
+
+        for ch_idx in range(n_channels):
+            p_in_w = channel_powers[ch_idx]
+            p_target_w = self._get_channel_target_power_w(opt_signal, ch_idx, is_stacked_wdm)
+
+            # 计算所需增益 (线性值)
+            if p_in_w > 0:
+                gain_linear = p_target_w / p_in_w
+            else:
+                gain_linear = 0.0
+            gains_linear.append(gain_linear)
+
+            # 获取该通道的复数数据
+            if is_stacked_wdm:
+                ch_data = opt_signal.data[ch_idx]  # (n_pol, N_samples)
+            else:
+                ch_data = opt_signal.data  # (n_pol, N_samples)
+
+            # 放大信号
+            amplified_ch_data = ch_data * np.sqrt(gain_linear)
+
+            # 计算 ASE 噪声方差 (ISRS-GN 公式)
+            # sigma_ase^2 = nf * h * nu * rs * (G - 1)
+            # 对于复数信号，需要除以 2 (实部/虚部分别承担噪声)
+            nu = channel_freqs[ch_idx]
+            G_minus_1 = max(gain_linear - 1.0, 0.0)
+
+            ase_variance_per_pol = 0.5 * self.nf_linear * h * nu * rs_hz * G_minus_1
+            ase_std_dev = np.sqrt(ase_variance_per_pol)  # sqrt(W)
+
+            # 生成复数高斯噪声并添加到放大后的信号
+            shape = amplified_ch_data.shape
+            ase_noise = (np.random.normal(0, ase_std_dev, shape) + 1j * np.random.normal(0, ase_std_dev, shape)).astype(
+                np.complex64
+            )
+
+            output_data_list.append(amplified_ch_data + ase_noise)
+
+        # 组装输出信号
+        if is_stacked_wdm:
+            output_data = np.stack(output_data_list, axis=0)  # (n_channels, n_pol, N_samples)
+        else:
+            output_data = output_data_list[0]
+
+        # 构建输出上下文 - 保留入纤功率信息供下一级使用
+        new_ctx = SignalContext(
+            sample_rate=opt_signal.ctx.sample_rate,
+            center_freq=opt_signal.ctx.center_freq,
+            n_pol=opt_signal.ctx.n_pol,
+            sps=opt_signal.ctx.sps,
+            sym_rate=opt_signal.ctx.sym_rate,
+            bits_per_symbol=opt_signal.ctx.bits_per_symbol,
+            is_ofdm=opt_signal.ctx.is_ofdm,
+            meta={
+                **(opt_signal.ctx.meta or {}),
+                "ideal_amp_nf_db": self.nf_db,
+                "ideal_amp_gains_linear": gains_linear,
+            },
+        )
+        return Signal(data=output_data.astype(np.complex64), ctx=new_ctx)
