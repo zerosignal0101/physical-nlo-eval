@@ -237,7 +237,7 @@ def test_wdm_fiber_ideal_amp(
             n2_si=2.6e-20,
             a_eff_um2=80.0,
             raman_r3=raman_r3,
-            compute_ctx_name="numpy",
+            compute_ctx_name="cupy",
         )
         print(
             f"  FiberChannel raman_r3: shape={test_fiber.raman_r3.shape if test_fiber.raman_r3 is not None else None}"
@@ -266,7 +266,7 @@ def test_wdm_fiber_ideal_amp(
             ref_lambda_nm=1550.0,
             d_pmd_ps_per_sqrt_km=0.0,
             raman_r3=raman_r3,
-            compute_ctx_name="numpy",
+            compute_ctx_name="cupy",
         )
 
         rx_optical = fiber.forward(current_signal)

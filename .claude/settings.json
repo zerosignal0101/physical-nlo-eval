@@ -6,7 +6,7 @@
       "Bash(python3 ./.trellis/scripts/task.py finish)",
       "Bash(C:/Users/zsig/miniconda3/envs/gnpy/python.exe *)",
       "Read(//d/C-Codes/Optical-Networks/PyNLO/**)",
-      "Read(//d/C-Codes/Optical-Networks/network-nlo-eval/src/network_nlo_eval/**)"
+      "Read(//d/C-Codes/Optical-Networks/network-nlo-eval/**)"
     ]
   },
   "enabledPlugins": {}

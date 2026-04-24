@@ -188,33 +188,108 @@ class BERCalculator:
 
     def calculate_evm(
         self,
-        rx_symbols: np.ndarray,
-        constellation_symbols: np.ndarray,
-        constellation_indices: np.ndarray | None = None,
+        rx_signal: Signal,
+        constellation: Constellation,
+        tx_bits: np.ndarray | None = None,
     ) -> float:
-        """计算误差矢量幅度 (EVM)。
+        """计算误差矢量幅度 (EVM)，通过 Signal 接口。
 
-        EVM 衡量接收信号相对于理想星座点的偏差。
+        内部自动完成：符号提取、功率归一化、TX 比特到理想星座点的索引映射。
 
         Parameters
         ----------
-        rx_symbols : np.ndarray
-            接收到的实际符号，形状为 (n_pol, n_symbols) 或 (n_pol, n_subcarriers, n_symbols)。
-        constellation_symbols : np.ndarray
-            归一化后的理想星座点数组，形状为 (n_constellation_points,)。
-        constellation_indices : np.ndarray | None
-            每个接收符号对应的理想星座点索引，用于从 constellation_symbols 中查找理想点。
+        rx_signal : Signal
+            接收信号（通常 sps >= 1，经 DSP 后的符号同步信号）。
+        constellation : Constellation
+            星座图对象，提供归一化的 LUT 和调制阶数信息。
+        tx_bits : np.ndarray | None
+            发送比特的交织数组，形状为 (n_pol * n_sym * bits_per_symbol,)。
 
         Returns
         -------
         float
-            计算得到的 EVM 值 (百分比)。
+            EVM 值 (百分比)。
 
         Raises
         ------
         ValueError
-            如果 rx_symbols 和 constellation_indices 长度不匹配。
+            如果 tx_bits 长度与接收符号数不匹配，或 n_pol 不兼容。
         """
+        # 1. 从 Signal 中提取符号（若 sps > 1 则降采样到每符号一点）
+        sps = rx_signal.ctx.sps
+        if sps > 1:
+            rx_symbols = rx_signal.data[:, ::sps]
+        else:
+            rx_symbols = rx_signal.data
+
+        if rx_symbols.ndim == 3:
+            rx_flat = rx_symbols.reshape(rx_symbols.shape[0], -1)
+        else:
+            rx_flat = rx_symbols
+
+        n_total_syms = rx_flat.shape[1]
+
+        # 2. 功率归一化（与 demapper/_demap_payload 一致）
+        rx_power = np.mean(np.abs(rx_flat) ** 2, axis=1, keepdims=True)
+        rx_power[rx_power == 0] = 1.0
+        rx_normalized = rx_flat / np.sqrt(rx_power)
+
+        # 3. 从 tx_bits 推导理想星座点
+        ideal_lut = constellation.lut
+        bits_per_sym = constellation.bits_per_symbol
+        n_pol_cst = constellation.n_pol
+
+        if tx_bits is None:
+            # 无 tx_bits：退化为零 EVM（理想情况）
+            return 0.0
+
+        # 验证长度
+        expected_len = n_pol_cst * n_total_syms * bits_per_sym
+        if len(tx_bits) < expected_len:
+            raise ValueError(
+                f"tx_bits length {len(tx_bits)} is too short. "
+                f"Expected {expected_len} for n_pol={n_pol_cst}, n_syms={n_total_syms}, "
+                f"bits_per_sym={bits_per_sym}."
+            )
+
+        # 按极化分离比特
+        # 比特布局: [pol0_b0, pol1_b0, pol0_b1, pol1_b1, ...] (DP)
+        # pol0 bits: tx_bits[0::2], pol1 bits: tx_bits[1::2]
+        pol_bits = [tx_bits[0::2], tx_bits[1::2]]  # list of 1 or 2 arrays
+
+        # 对每个极化：将比特流 reshape 为 (n_sym, bits_per_sym)
+        # 并通过 Gray 编码计算每个符号的 constellation index
+        # index = bit0*2^(bits-1) + bit1*2^(bits-2) + ... + bitN
+        powers_of_two = 1 << np.arange(bits_per_sym - 1, -1, -1)  # e.g., [2, 1] for QPSK
+
+        # 重组: pol_bits[pol] shape (n_sym * bits_per_sym,) -> (n_sym, bits_per_sym) -> (n_sym,)
+        indices_per_pol = []
+        for pol in range(n_pol_cst):
+            bits_pol = pol_bits[pol][: n_total_syms * bits_per_sym]
+            bits_reshaped = bits_pol.reshape(n_total_syms, bits_per_sym)
+            idx = np.sum(bits_reshaped.astype(int) * powers_of_two[np.newaxis, :], axis=1)
+            indices_per_pol.append(idx)
+
+        # 构建交织的 constellation_indices: [pol0_sym0, pol1_sym0, pol0_sym1, pol1_sym1, ...]
+        if n_pol_cst == 1:
+            constellation_indices = indices_per_pol[0]
+        else:
+            # n_pol_cst == 2 (DP)
+            indices_combined = np.empty(n_total_syms * n_pol_cst, dtype=int)
+            indices_combined[0::2] = indices_per_pol[0]  # pol0 at even
+            indices_combined[1::2] = indices_per_pol[1]  # pol1 at odd
+            constellation_indices = indices_combined
+
+        # 4. 调用底层 EVM 计算
+        return self._calculate_evm_arrays(rx_normalized, ideal_lut, constellation_indices)
+
+    def _calculate_evm_arrays(
+        self,
+        rx_symbols: np.ndarray,
+        constellation_symbols: np.ndarray,
+        constellation_indices: np.ndarray | None = None,
+    ) -> float:
+        """底层 EVM 计算（数组接口，供内部或旧代码使用）。"""
         # Reshape rx_symbols to (n_pol, -1) for easier processing
         if rx_symbols.ndim == 3:
             # OFDM: (n_pol, n_subcarriers, n_symbols) -> (n_pol, n_subcarriers * n_symbols)

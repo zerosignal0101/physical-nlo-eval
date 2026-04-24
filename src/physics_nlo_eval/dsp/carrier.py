@@ -8,6 +8,7 @@ from scipy.interpolate import interp1d
 
 from physics_nlo_eval.core.base import BaseBlock
 from physics_nlo_eval.core.signal import Signal, SignalContext
+from physics_nlo_eval.tx.mapper import Constellation
 
 
 class PhaseNoiseCompensation(BaseBlock):
@@ -26,8 +27,9 @@ class PhaseNoiseCompensation(BaseBlock):
         分块处理时的符号块大小 (用于 BPS 和 V&V 的滑动平均或块平均)，默认 128。
     m_power : int, optional
         V&V 算法的 M 次方数，QPSK 和一般方形 QAM 的外部星环通常为 4。
-    constellation : np.ndarray | None, optional
-        理想星座点数组，提供给 BPS 算法以进行精确的欧氏距离判决。若未提供则使用简化代数约束。
+    constellation : np.ndarray | Constellation | None, optional
+        理想星座点数组或 Constellation 对象，提供给 BPS 算法以进行精确的欧氏距离判决。
+        若为 Constellation 实例，则使用其 .lut 属性。若未提供则使用简化代数约束。
     """
 
     def __init__(
@@ -36,7 +38,7 @@ class PhaseNoiseCompensation(BaseBlock):
         n_test_phases: int = 32,
         block_size: int = 128,
         m_power: int = 4,
-        constellation: np.ndarray | None = None,
+        constellation: np.ndarray | Constellation | None = None,
     ) -> None:
         """初始化 PhaseNoiseCompensation。"""
         super().__init__(name=f"PhaseNoiseComp({method})")
@@ -47,7 +49,11 @@ class PhaseNoiseCompensation(BaseBlock):
         self.n_test_phases = n_test_phases
         self.block_size = block_size
         self.m_power = m_power
-        self.constellation = constellation
+        # 支持 Constellation 对象或原始数组
+        if isinstance(constellation, Constellation):
+            self._constellation_lut = constellation.lut
+        else:
+            self._constellation_lut = constellation
 
     def forward(self, signal: Signal) -> Signal:
         """执行载波相位噪声补偿。"""
@@ -105,8 +111,8 @@ class PhaseNoiseCompensation(BaseBlock):
             block = pol_data[i : i + self.block_size]
             rotated = block * test_phasors[:, np.newaxis]
 
-            if self.constellation is not None:
-                diff = rotated[:, :, np.newaxis] - self.constellation[np.newaxis, np.newaxis, :]
+            if self._constellation_lut is not None:
+                diff = rotated[:, :, np.newaxis] - self._constellation_lut[np.newaxis, np.newaxis, :]
                 min_dist = np.min(np.abs(diff) ** 2, axis=2)
                 cost = np.sum(min_dist, axis=1)
             else:

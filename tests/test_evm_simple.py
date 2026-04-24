@@ -27,7 +27,7 @@ def test_evm_basic():
     # All indices are 0, 1, 2, 3
     indices = np.array([0, 1, 2, 3])
 
-    evm = ber_calc.calculate_evm(rx_1pol, constellation, indices)
+    evm = ber_calc._calculate_evm_arrays(rx_1pol, constellation, indices)
     print(f"EVM (perfect): {evm:.6f}% (expected ~0%)")
 
     # Test 2: Small noise added
@@ -37,7 +37,7 @@ def test_evm_basic():
     rx_noisy = constellation + noise
     rx_noisy_1pol = rx_noisy.reshape(1, -1)
 
-    evm_noisy = ber_calc.calculate_evm(rx_noisy_1pol, constellation, indices)
+    evm_noisy = ber_calc._calculate_evm_arrays(rx_noisy_1pol, constellation, indices)
     print(f"EVM (noisy): {evm_noisy:.6f}%")
 
     # Test 3: Large noise
@@ -46,7 +46,7 @@ def test_evm_basic():
     rx_large = constellation + noise_large
     rx_large_1pol = rx_large.reshape(1, -1)
 
-    evm_large = ber_calc.calculate_evm(rx_large_1pol, constellation, indices)
+    evm_large = ber_calc._calculate_evm_arrays(rx_large_1pol, constellation, indices)
     print(f"EVM (large noise): {evm_large:.6f}%")
 
     # Test 4: Dual polarization (DP-QPSK)
@@ -68,7 +68,7 @@ def test_evm_basic():
         dtype=np.complex128,
     )  # shape (2, 4)
 
-    evm_dp = ber_calc.calculate_evm(rx_dp, constellation, indices_dp)
+    evm_dp = ber_calc._calculate_evm_arrays(rx_dp, constellation, indices_dp)
     print(f"EVM (DP perfect): {evm_dp:.6f}% (expected ~0%)")
 
     # Test 5: DP with noise
@@ -77,7 +77,7 @@ def test_evm_basic():
     noise_dp = 0.1 * (np.random.randn(2, 4) + 1j * np.random.randn(2, 4))
     rx_dp_noisy = rx_dp + noise_dp
 
-    evm_dp_noisy = ber_calc.calculate_evm(rx_dp_noisy, constellation, indices_dp)
+    evm_dp_noisy = ber_calc._calculate_evm_arrays(rx_dp_noisy, constellation, indices_dp)
     print(f"EVM (DP noisy): {evm_dp_noisy:.6f}%")
 
     print("\n" + "=" * 60)
