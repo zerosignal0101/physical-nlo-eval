@@ -144,6 +144,65 @@ class BERCalculator:
         """
         self.ignore_headers = ignore_headers
 
+    # ---- 辅助静态方法 ----
+
+    @staticmethod
+    def _extract_payload(framed_signal: np.ndarray, pilot_info: dict) -> np.ndarray:
+        """从含导频的帧结构中剔除导频，提取净荷符号 (单偏振)。
+
+        与 Demapper._extract_payload 逻辑完全一致。
+        """
+        period = pilot_info["period"]
+        p_len = len(np.atleast_1d(pilot_info["symbols"]))
+
+        block_size = p_len + period
+        n_total = len(framed_signal)
+        n_blocks = int(np.ceil(n_total / block_size))
+
+        payload_chunks = []
+        for i in range(n_blocks):
+            start_idx = i * block_size
+            payload_start = start_idx + p_len
+            payload_end = min(start_idx + block_size, n_total)
+
+            if payload_start < payload_end:
+                payload_chunks.append(framed_signal[payload_start:payload_end])
+
+        if payload_chunks:
+            return np.concatenate(payload_chunks)
+        return np.array([], dtype=framed_signal.dtype)
+
+    @staticmethod
+    def _diff_encode_indices(symbol_indices: np.ndarray, bits_per_symbol: int, m_ary: int) -> np.ndarray:
+        """象限差分编码，与 Mapper._diff_encode 逻辑一致。
+
+        仅编码象限比特 (I/Q 的 MSB)，低比特保持不变。
+        m_ary < 4 (OOK/BPSK) 时不执行编码。
+        """
+        if m_ary < 4:
+            return symbol_indices
+
+        k_per_dim = bits_per_symbol // 2
+        i_sign_bit = (symbol_indices >> (bits_per_symbol - 1)) & 1
+        q_sign_bit = (symbol_indices >> (k_per_dim - 1)) & 1
+
+        quad_bits = (i_sign_bit << 1) | q_sign_bit
+        encoded_quad = np.zeros_like(quad_bits)
+
+        current_phase = 0
+        for i in range(len(quad_bits)):
+            current_phase = (current_phase + quad_bits[i]) % 4
+            encoded_quad[i] = current_phase
+
+        mask = ~((1 << (bits_per_symbol - 1)) | (1 << (k_per_dim - 1)))
+        return (
+            (symbol_indices & mask)
+            | ((encoded_quad >> 1) << (bits_per_symbol - 1))
+            | ((encoded_quad & 1) << (k_per_dim - 1))
+        )
+
+    # ---- BER ----
+
     def calculate_ber(self, tx_bits: np.ndarray, rx_bits: np.ndarray) -> float:
         """
         计算比特误码率 (BER)。
@@ -186,24 +245,37 @@ class BERCalculator:
             return 0.0  # Avoid division by zero
         return num_errors / total_bits
 
+    # ---- EVM ----
+
     def calculate_evm(
         self,
         rx_signal: Signal,
         constellation: Constellation,
         tx_bits: np.ndarray | None = None,
+        diff_coding: bool = False,
+        pilot_info: dict | None = None,
     ) -> float:
-        """计算误差矢量幅度 (EVM)，通过 Signal 接口。
+        """计算误差矢量幅度 (EVM)，与 Demapper 功能同步。
 
-        内部自动完成：符号提取、功率归一化、TX 比特到理想星座点的索引映射。
+        预处理步骤与 Demapper.forward 保持一致：
+        1. 导频剔除 (若存在 pilot_info)
+        2. 降采样 (若 sps > 1)
+        3. OFDM 展平 (3D → 2D)
+        4. 功率归一化
+        5. 从 tx_bits 重建理想星座点 (含差分解码逆操作)
 
         Parameters
         ----------
         rx_signal : Signal
-            接收信号（通常 sps >= 1，经 DSP 后的符号同步信号）。
+            接收信号（经 DSP 后的符号同步信号）。
         constellation : Constellation
-            星座图对象，提供归一化的 LUT 和调制阶数信息。
+            星座图对象，提供归一化 LUT 和调制参数。
         tx_bits : np.ndarray | None
-            发送比特的交织数组，形状为 (n_pol * n_sym * bits_per_symbol,)。
+            发送比特流 (仅净荷，不含导频比特)。
+        diff_coding : bool
+            发送端是否启用了象限差分编码。
+        pilot_info : dict | None
+            导频配置。若为 None 则从 rx_signal.ctx.meta["pilot_info"] 获取。
 
         Returns
         -------
@@ -213,37 +285,47 @@ class BERCalculator:
         Raises
         ------
         ValueError
-            如果 tx_bits 长度与接收符号数不匹配，或 n_pol 不兼容。
+            如果 tx_bits 长度与净荷符号数不匹配。
         """
-        # 1. 从 Signal 中提取符号（若 sps > 1 则降采样到每符号一点）
+        # ---- 1. 降采样 ----
         sps = rx_signal.ctx.sps
         if sps > 1:
             rx_symbols = rx_signal.data[:, ::sps]
         else:
             rx_symbols = rx_signal.data
 
+        # ---- 2. OFDM 展平 ----
         if rx_symbols.ndim == 3:
             rx_flat = rx_symbols.reshape(rx_symbols.shape[0], -1)
         else:
             rx_flat = rx_symbols
 
+        # ---- 3. 导频剔除 (与 Demapper.forward 同步) ----
+        active_pilot_info = pilot_info or rx_signal.ctx.meta.get("pilot_info")
+        if active_pilot_info:
+            payload_pols = []
+            for pol in range(rx_flat.shape[0]):
+                payload_pols.append(self._extract_payload(rx_flat[pol], active_pilot_info))
+            rx_flat = np.stack(payload_pols, axis=0)
+
         n_total_syms = rx_flat.shape[1]
 
-        # 2. 功率归一化（与 demapper/_demap_payload 一致）
+        if n_total_syms == 0:
+            return 0.0
+
+        # ---- 4. 功率归一化 ----
         rx_power = np.mean(np.abs(rx_flat) ** 2, axis=1, keepdims=True)
         rx_power[rx_power == 0] = 1.0
         rx_normalized = rx_flat / np.sqrt(rx_power)
 
-        # 3. 从 tx_bits 推导理想星座点
+        # ---- 5. 重建理想星座点 ----
         ideal_lut = constellation.lut
         bits_per_sym = constellation.bits_per_symbol
         n_pol_cst = constellation.n_pol
 
         if tx_bits is None:
-            # 无 tx_bits：退化为零 EVM（理想情况）
             return 0.0
 
-        # 验证长度
         expected_len = n_pol_cst * n_total_syms * bits_per_sym
         if len(tx_bits) < expected_len:
             raise ValueError(
@@ -253,34 +335,35 @@ class BERCalculator:
             )
 
         # 按极化分离比特
-        # 比特布局: [pol0_b0, pol1_b0, pol0_b1, pol1_b1, ...] (DP)
-        # pol0 bits: tx_bits[0::2], pol1 bits: tx_bits[1::2]
-        pol_bits = [tx_bits[0::2], tx_bits[1::2]]  # list of 1 or 2 arrays
+        if n_pol_cst == 1:
+            pol_bits = [tx_bits]
+        else:
+            pol_bits = [tx_bits[0::2], tx_bits[1::2]]
 
-        # 对每个极化：将比特流 reshape 为 (n_sym, bits_per_sym)
-        # 并通过 Gray 编码计算每个符号的 constellation index
-        # index = bit0*2^(bits-1) + bit1*2^(bits-2) + ... + bitN
-        powers_of_two = 1 << np.arange(bits_per_sym - 1, -1, -1)  # e.g., [2, 1] for QPSK
+        # 计算 Gray 索引并可选差分编码 (每极化独立)
+        powers_of_two = 1 << np.arange(bits_per_sym - 1, -1, -1)
 
-        # 重组: pol_bits[pol] shape (n_sym * bits_per_sym,) -> (n_sym, bits_per_sym) -> (n_sym,)
         indices_per_pol = []
         for pol in range(n_pol_cst):
             bits_pol = pol_bits[pol][: n_total_syms * bits_per_sym]
             bits_reshaped = bits_pol.reshape(n_total_syms, bits_per_sym)
             idx = np.sum(bits_reshaped.astype(int) * powers_of_two[np.newaxis, :], axis=1)
+
+            if diff_coding:
+                idx = self._diff_encode_indices(idx, bits_per_sym, constellation.m_ary)
+
             indices_per_pol.append(idx)
 
-        # 构建交织的 constellation_indices: [pol0_sym0, pol1_sym0, pol0_sym1, pol1_sym1, ...]
+        # 构建交织的 constellation_indices
         if n_pol_cst == 1:
             constellation_indices = indices_per_pol[0]
         else:
-            # n_pol_cst == 2 (DP)
             indices_combined = np.empty(n_total_syms * n_pol_cst, dtype=int)
-            indices_combined[0::2] = indices_per_pol[0]  # pol0 at even
-            indices_combined[1::2] = indices_per_pol[1]  # pol1 at odd
+            indices_combined[0::2] = indices_per_pol[0]
+            indices_combined[1::2] = indices_per_pol[1]
             constellation_indices = indices_combined
 
-        # 4. 调用底层 EVM 计算
+        # ---- 6. 底层 EVM ----
         return self._calculate_evm_arrays(rx_normalized, ideal_lut, constellation_indices)
 
     def _calculate_evm_arrays(
@@ -314,14 +397,25 @@ class BERCalculator:
         rx_cropped_normalized = rx_cropped / np.sqrt(rx_power)
 
         if constellation_indices is not None:
-            # Use the provided indices to get ideal constellation points
-            indices_cropped = constellation_indices[start_idx:].flatten()
             n_symbols_expected = rx_cropped.shape[1]
 
+            # Determine index format and crop accordingly
+            if len(constellation_indices) == n_total_symbols:
+                # Same index for all pols at each symbol time (single-pol case)
+                indices_cropped = constellation_indices[start_idx:].flatten()
+            elif len(constellation_indices) == n_total_symbols * n_pol:
+                # Interleaved: [pol0_t0, pol1_t0, pol0_t1, pol1_t1, ...]
+                # Crop n_pol entries per symbol to keep interleaved alignment
+                indices_cropped = constellation_indices[start_idx * n_pol:].flatten()
+            else:
+                raise ValueError(
+                    f"constellation_indices length {len(constellation_indices)} does not match "
+                    f"rx_symbols length {n_total_symbols} (n_pol={n_pol})"
+                )
+
             if len(indices_cropped) == n_symbols_expected:
-                # indices length matches n_symbols: same index for all pols at each time slot
+                # Same index for all pols at each time slot
                 ideal_symbols = constellation_symbols[indices_cropped]  # (n_symbols,)
-                # Expand to (n_pol, n_symbols)
                 ideal_cropped = np.repeat(ideal_symbols[np.newaxis, :], n_pol, axis=0)
             elif len(indices_cropped) == n_symbols_expected * n_pol:
                 # indices are interleaved: [pol0_t0, pol1_t0, pol0_t1, pol1_t1, ...]
@@ -333,7 +427,7 @@ class BERCalculator:
                     raise ValueError(f"Interleaved indices only supported for n_pol=2, got {n_pol}")
             else:
                 raise ValueError(
-                    f"constellation_indices length {len(indices_cropped)} does not match "
+                    f"constellation_indices cropped length {len(indices_cropped)} does not match "
                     f"rx_symbols cropped length {n_symbols_expected} (n_pol={n_pol})"
                 )
         else:
