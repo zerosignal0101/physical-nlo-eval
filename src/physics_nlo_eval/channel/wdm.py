@@ -207,13 +207,17 @@ class WDMDemux(BaseBlock):
     ----------
     filter_type : str, optional
         通道滤波类型，支持 'fir' 和 'ideal_rectangular'.
+    roll_off : float, optional
+        RRC 滚降系数, 用于计算 LPF 截止频率 = sym_rate * (1 + roll_off) / 2.
+        默认为 0.1。若设为 None 则使用 original_sr / 2 (旧行为).
     """
 
-    def __init__(self, filter_type: str = "fir") -> None:
+    def __init__(self, filter_type: str = "fir", roll_off: float | None = 0.1) -> None:
         super().__init__(name="WDMDemux")
         if filter_type not in ["fir", "ideal_rectangular"]:
             raise ValueError(f"Unsupported filter type: {filter_type}.")
         self.filter_type = filter_type
+        self.roll_off = roll_off
 
     def _fir_lowpass(self, data: np.ndarray, cutoff_hz: float, sample_rate: float) -> np.ndarray:
         from scipy.signal import filtfilt, firwin
@@ -286,8 +290,11 @@ class WDMDemux(BaseBlock):
             phasor = np.exp(-1j * 2 * np.pi * f_offset * t)
             downconverted_data = signal.data * phasor[np.newaxis, :]
 
-            # 2. 低通滤波 (截断至原单通道带宽)
-            cutoff_hz = original_sr / 2.0
+            # 2. 低通滤波 (截断至信号带宽: sym_rate * (1+roll_off) / 2)
+            if self.roll_off is not None:
+                cutoff_hz = original_ctx.sym_rate * (1 + self.roll_off) / 2.0
+            else:
+                cutoff_hz = original_sr / 2.0
             if self.filter_type == "fir":
                 filtered_data = self._fir_lowpass(downconverted_data, cutoff_hz, current_sr)
             else:
