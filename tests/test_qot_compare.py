@@ -195,7 +195,7 @@ class PyNLOQOTBenchmark:
             ref_lambda_nm=1550.0,
             d_pmd_ps_per_sqrt_km=0.0,
             raman_r3=raman_r3,
-            compute_ctx_name="numpy",
+            compute_ctx_name="cupy",
         )
         return fiber.forward(wdm_signal)
 

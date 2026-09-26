@@ -132,7 +132,7 @@ def test_wdm_fiber(
         slope_a_eff_um2_per_nm=0.05,
         ref_lambda_nm=1550.0,
         d_pmd_ps_per_sqrt_km=0.0,
-        compute_ctx_name="numpy",
+        compute_ctx_name="cupy",
     )
     rx_optical = fiber.forward(wdm_signal)
 

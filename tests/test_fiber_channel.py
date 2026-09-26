@@ -85,6 +85,7 @@ def test_fiber_channel_basic():
         beta2_ps2_per_km=beta2,
         beta3_ps3_per_km=beta3,
         coarse_step_size_m=500.0,
+        compute_ctx_name="cupy",
     )
 
     # 传播
@@ -190,6 +191,7 @@ def test_fiber_channel_power_attenuation():
             beta2_ps2_per_km=-20e-3,
             beta3_ps3_per_km=0.1e-3,
             coarse_step_size_m=500.0,
+            compute_ctx_name="cupy",
         )
 
         output = fiber.forward(signal)
@@ -292,6 +294,7 @@ def test_fiber_channel_chromatic_dispersion():
         beta3_ps3_per_km=0.0,
         coarse_step_size_m=500.0,
         n2_si=0.0,  # 抑制非线性效应
+        compute_ctx_name="cupy",
     )
 
     output = fiber.forward(signal)
@@ -408,6 +411,7 @@ def test_fiber_channel_pmd():
         beta3_ps3_per_km=0.1e-3,
         d_pmd_ps_per_sqrt_km=d_pmd,
         coarse_step_size_m=500.0,
+        compute_ctx_name="cupy",
     )
 
     # Compute initial energy directly from time-domain combined_data
@@ -492,6 +496,7 @@ def test_fiber_channel_sech_pulse():
         beta2_ps2_per_km=-20e-3,
         beta3_ps3_per_km=0.0,
         coarse_step_size_m=500.0,
+        compute_ctx_name="cupy",
     )
 
     output = fiber.forward(signal)
@@ -588,7 +593,7 @@ def test_fiber_channel_no_nan_inf():
             f"α={cfg['alpha_db_per_km']}dB/km, β2={beta2_val:.1f}ps²/km"
         )
 
-        fiber = FiberChannel(**cfg)
+        fiber = FiberChannel(compute_ctx_name="cupy", **cfg)
         output = fiber.forward(signal)
 
         has_nan = np.any(np.isnan(output.data))
@@ -655,6 +660,7 @@ def test_fiber_channel_single_polarization():
         beta2_ps2_per_km=-20e-3,
         beta3_ps3_per_km=0.1e-3,
         coarse_step_size_m=500.0,
+        compute_ctx_name="cupy",
     )
 
     # 传播
@@ -778,6 +784,7 @@ def test_fiber_channel_single_pol_dispersion():
         beta3_ps3_per_km=0.0,
         coarse_step_size_m=500.0,
         n2_si=0.0,  # 抑制非线性效应
+        compute_ctx_name="cupy",
     )
 
     output = fiber.forward(signal)

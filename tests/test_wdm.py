@@ -7,7 +7,7 @@
 
 import numpy as np
 
-from physics_nlo_eval.channel.wdm import ChannelExtractor, WDMDemux, WDMMux
+from physics_nlo_eval.channel.wdm import ChannelExtractor, ChannelSpec, WDMDemux, WDMMux, WDMPlan
 from physics_nlo_eval.core.signal import Signal
 from physics_nlo_eval.dsp.carrier import PhaseNoiseCompensation
 from physics_nlo_eval.dsp.time_domain import TimingRecovery
@@ -18,6 +18,21 @@ from physics_nlo_eval.tx.rrc import RRCFilter
 # ============================================================================
 # 辅助函数
 # ============================================================================
+
+
+def make_wdm_plan(n_channels: int, spacing_hz: float) -> WDMPlan:
+    """构建等间隔、以参考频率为中心的灵活栅格规划。
+
+    等价于旧 ``WDMMux(channel_spacing_hz=...)`` 的通道布局：
+    通道频偏对称分布在参考频率两侧。
+    """
+    center = (n_channels - 1) / 2
+    return WDMPlan(
+        reference_freq_hz=193.1e12,
+        channels=[
+            ChannelSpec(channel_id=i, freq_offset_hz=(i - center) * spacing_hz) for i in range(n_channels)
+        ],
+    )
 
 
 def add_phase_noise(symbols: np.ndarray, linewidth_hz: float, symbol_rate: float) -> np.ndarray:
@@ -134,7 +149,7 @@ def test_wdm_mux_demux_basic():
         sig_rrc = tx_rrc.forward(sig_base)
         channels.append(sig_rrc)
 
-    wdm_mux = WDMMux(channel_spacing_hz=channel_spacing_hz, target_sample_rate_hz=400e9)
+    wdm_mux = WDMMux(wdm_plan=make_wdm_plan(n_channels, channel_spacing_hz), target_sample_rate_hz=400e9)
     wdm_signal = wdm_mux.combine(channels)
 
     wdm_demux = WDMDemux()
@@ -194,7 +209,7 @@ def test_wdm_with_phase_noise_bps():
         sig_noisy = Signal(data=add_phase_noise(sig_rrc.data, linewidth_hz, symbol_rate * 4), ctx=sig_rrc.ctx)
         channels.append(sig_noisy)
 
-    wdm_mux = WDMMux(channel_spacing_hz=channel_spacing_hz, target_sample_rate_hz=400e9)
+    wdm_mux = WDMMux(wdm_plan=make_wdm_plan(n_channels, channel_spacing_hz), target_sample_rate_hz=400e9)
     wdm_signal = wdm_mux.combine(channels)
 
     wdm_demux = WDMDemux()
@@ -277,7 +292,7 @@ def test_wdm_with_timing_offset():
         sig_delayed = Signal(data=apply_fractional_delay(sig_rrc.data, delay_samples), ctx=sig_rrc.ctx)
         channels.append(sig_delayed)
 
-    wdm_mux = WDMMux(channel_spacing_hz=channel_spacing_hz, target_sample_rate_hz=400e9)
+    wdm_mux = WDMMux(wdm_plan=make_wdm_plan(n_channels, channel_spacing_hz), target_sample_rate_hz=400e9)
     wdm_signal = wdm_mux.combine(channels)
 
     wdm_demux = WDMDemux()
@@ -369,7 +384,7 @@ def test_wdm_with_pilot_assisted_vv():
         sig_noisy = Signal(data=add_phase_noise(sig_rrc.data, linewidth_hz, symbol_rate * 4), ctx=sig_rrc.ctx)
         channels.append(sig_noisy)
 
-    wdm_mux = WDMMux(channel_spacing_hz=channel_spacing_hz, target_sample_rate_hz=400e9)
+    wdm_mux = WDMMux(wdm_plan=make_wdm_plan(n_channels, channel_spacing_hz), target_sample_rate_hz=400e9)
     wdm_signal = wdm_mux.combine(channels)
 
     # 使用 FIR 滤波的 WDMDemux
@@ -446,7 +461,7 @@ def test_wdm_high_order_qam():
         sig_rrc = tx_rrc.forward(sig_base)
         channels.append(sig_rrc)
 
-    wdm_mux = WDMMux(channel_spacing_hz=channel_spacing_hz, target_sample_rate_hz=400e9)
+    wdm_mux = WDMMux(wdm_plan=make_wdm_plan(n_channels, channel_spacing_hz), target_sample_rate_hz=400e9)
     wdm_signal = wdm_mux.combine(channels)
 
     wdm_demux = WDMDemux()

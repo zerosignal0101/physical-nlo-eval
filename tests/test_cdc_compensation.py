@@ -115,6 +115,7 @@ def test_cdc_beta2_compensation():
         beta3_ps3_per_km=beta3,
         coarse_step_size_m=500.0,
         n2_si=0.0,  # 抑制非线性
+        compute_ctx_name="cupy",
     )
 
     # 传播
@@ -224,6 +225,7 @@ def test_cdc_beta3_compensation():
         beta3_ps3_per_km=beta3,
         coarse_step_size_m=500.0,
         n2_si=0.0,
+        compute_ctx_name="cupy",
     )
 
     output = fiber.forward(signal)
@@ -326,6 +328,7 @@ def test_cdc_beta2_beta3_combined():
         beta3_ps3_per_km=beta3,
         coarse_step_size_m=500.0,
         n2_si=0.0,
+        compute_ctx_name="cupy",
     )
 
     output = fiber.forward(signal)
@@ -423,6 +426,7 @@ def test_cdc_metadata_extraction():
         beta3_ps3_per_km=beta3,
         coarse_step_size_m=500.0,
         n2_si=0.0,
+        compute_ctx_name="cupy",
     )
 
     output = fiber.forward(signal)
