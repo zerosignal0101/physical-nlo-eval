@@ -1,6 +1,9 @@
 """模数转换器 (ADC) 模块。"""
 
+from fractions import Fraction
+
 import numpy as np
+from scipy.signal import resample_poly
 
 from physics_nlo_eval.core.base import BaseBlock
 from physics_nlo_eval.core.signal import Signal, SignalContext
@@ -55,40 +58,27 @@ class ADC(BaseBlock):
         -------
         np.ndarray
             量化后的整数或浮点信号数据。
+
+        Notes
+        -----
+        量化在**物理幅度域**进行：输出的幅度尺度与输入一致，不做归一化。
+        这一点很重要——旧实现先按 RMS 归一化再量化，返回值被隐式重新缩放到
+        单位 RMS，下游无法从输出还原输入的真实幅度。
         """
-        # Scale data to [-1, 1] based on its peak or RMS for clipping, then quantize.
-        # For simplicity, let's normalize by current max amplitude to fit within ADC range
-        # and then apply quantization.
+        # 满量程 = clip_ratio × 分量 RMS。这里用实部/虚部拼接后的 RMS（即分量
+        # RMS），而非复包络 RMS，二者相差 sqrt(2) 倍。
+        component_rms = np.sqrt(np.mean(np.concatenate((data.real.ravel(), data.imag.ravel())) ** 2))
+        if component_rms <= np.finfo(float).eps:
+            # 全零（或次正规）输入：量化无意义，原样返回，避免除零。
+            return data.astype(np.complex64, copy=True)
+        full_scale = self.clip_ratio * component_rms
+        step = 2 * full_scale / (self.num_levels - 1)
 
-        # Calculate RMS for clipping
-        data_rms = np.sqrt(np.mean(np.abs(data) ** 2))
+        def quantize_component(component: np.ndarray) -> np.ndarray:
+            clipped = np.clip(component, -full_scale, full_scale)
+            return np.round((clipped + full_scale) / step) * step - full_scale
 
-        # Max voltage swing for the ADC. If clip_ratio=1, RMS is at full scale.
-        # This is a simplification. Usually, full_scale_voltage = clip_ratio * RMS_signal_voltage.
-        # Let's assume input signal is normalized by its RMS to fit range.
-
-        if data_rms > 1e-12:  # Avoid division by zero
-            scaled_data = data / data_rms * self.clip_ratio  # If clip_ratio = 1, RMS is 1.
-
-            # Clip values if they exceed the ADC's max range (e.g., [-1, 1])
-            clipped_data = np.clip(scaled_data.real, -1.0, 1.0) + 1j * np.clip(scaled_data.imag, -1.0, 1.0)
-        else:
-            clipped_data = data.copy()
-
-        # Quantization: map values from [-1, 1] to discrete levels
-        # Assuming signed quantization.
-        # Shift to [0, 2^B-1], round, then shift back.
-
-        # Quantize real and imaginary parts separately
-        # Normalize to [0, 1] for quantization levels: (clipped_data.real + 1) / 2
-        quantized_real = (
-            np.round(((clipped_data.real + 1.0) / 2.0) * (self.num_levels - 1)) / (self.num_levels - 1) * 2.0 - 1.0
-        )
-        quantized_imag = (
-            np.round(((clipped_data.imag + 1.0) / 2.0) * (self.num_levels - 1)) / (self.num_levels - 1) * 2.0 - 1.0
-        )
-
-        return (quantized_real + 1j * quantized_imag).astype(np.complex64)
+        return (quantize_component(data.real) + 1j * quantize_component(data.imag)).astype(np.complex64)
 
     def forward(self, analog_signal: Signal) -> Signal:
         """
@@ -118,15 +108,12 @@ class ADC(BaseBlock):
             )
 
         # Resampling / Downsampling
+        # 用有理多相重采样代替整数抽取：旧实现对非整数倍率直接按 int() 截断抽取，
+        # 既无抗混叠滤波，也会静默改变实际采样率。Fraction(...).limit_denominator
+        # 把任意倍率近似为有理数，再由 resample_poly 做带抗混叠的多相滤波。
         if target_sample_rate < current_sample_rate:
-            resampling_factor = int(current_sample_rate / target_sample_rate)
-            if current_sample_rate % target_sample_rate != 0:
-                print(
-                    f"Warning: Input sample rate ({current_sample_rate}) is not an integer multiple of "
-                    f"target sample rate ({target_sample_rate}). Simple downsampling will truncate."
-                )
-
-            downsampled_data = analog_signal.data[:, ::resampling_factor]
+            ratio = Fraction(target_sample_rate / current_sample_rate).limit_denominator(10_000)
+            downsampled_data = resample_poly(analog_signal.data, ratio.numerator, ratio.denominator, axis=-1)
         else:
             downsampled_data = analog_signal.data.copy()
 
@@ -138,7 +125,9 @@ class ADC(BaseBlock):
             sample_rate=target_sample_rate,
             center_freq=analog_signal.ctx.center_freq,  # Still baseband
             n_pol=analog_signal.ctx.n_pol,
-            sps=analog_signal.ctx.sps,  # sps might change if this is for symbol-rate sampling
+            # 采样率变了，sps 必须按新采样率重算；沿用输入的 sps 会让
+            # SignalContext.__post_init__ 推出一个错误的 sym_rate。
+            sps=target_sample_rate / analog_signal.ctx.sym_rate if analog_signal.ctx.sym_rate > 0 else 0,
             sym_rate=analog_signal.ctx.sym_rate,
             bits_per_symbol=analog_signal.ctx.bits_per_symbol,
             is_ofdm=analog_signal.ctx.is_ofdm,

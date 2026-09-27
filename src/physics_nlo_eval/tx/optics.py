@@ -96,8 +96,14 @@ class PolarizationMultiplexer(BaseBlock):
 
     将两个单偏振光信号组合成一个双偏振信号。
     此模块通常在 IQModulator 之后，或由 IQModulator 内部完成。
-    为了简化，我们假设 IQModulator 已经处理了偏振复用（输出 N_pol, N_samples）。
-    此模块仅作为一个概念上的占位符。
+
+    两种用法：
+
+    - 直接调用 :meth:`combine` 合并两个 SP 信号；
+    - 在 Pipeline 中把第二个 ``Signal`` 放入第一个信号的
+      ``ctx.meta["orthogonal_polarization"]``，由 :meth:`forward` 取出合并。
+
+    已经是双偏振的信号原样透传。
     """
 
     def __init__(self) -> None:
@@ -109,7 +115,8 @@ class PolarizationMultiplexer(BaseBlock):
         处理光信号。
 
         如果输入已经是双偏振，则直接返回。
-        如果输入是单偏振，此模块无法将其变为双偏振，会报错。
+        如果输入是单偏振，则尝试从 ``ctx.meta["orthogonal_polarization"]``
+        取出正交偏振信号并合并；取不到则报错。
 
         Parameters
         ----------
@@ -126,13 +133,49 @@ class PolarizationMultiplexer(BaseBlock):
         ValueError
             如果输入信号不是双偏振且无法进行偏振复用。
         """
-        if optical_signal.ctx.n_pol == 2:
+        # 同时校验 n_pol 与数据行数：仅声明 n_pol=2 但只有一行数据的畸形信号
+        # 以前会被静默透传，现在必须走 combine 路径。
+        if optical_signal.ctx.n_pol == 2 and optical_signal.data.shape[0] == 2:
             return optical_signal
-        # Realistically, this should take two SP signals and combine them.
-        # Given our current Signal structure, a single Signal already has n_pol.
-        # This implies that a DP signal is generated directly by Mapper/IQModulator.
-        # So this module mainly serves to validate if the signal is indeed DP.
+        second = optical_signal.ctx.meta.get("orthogonal_polarization")
+        if isinstance(second, Signal):
+            return self.combine(optical_signal, second)
         raise ValueError(
             "Cannot perform polarization multiplexing on a single-polarization signal from this module. "
-            "Ensure your Mapper/IQModulator is configured for DP output if needed."
+            "Provide the second polarization via combine(x, y) or "
+            "signal.ctx.meta['orthogonal_polarization']."
         )
+
+    def combine(self, x_pol: Signal, y_pol: Signal) -> Signal:
+        """
+        将两个兼容的单偏振信号合并为一个双偏振信号。
+
+        Parameters
+        ----------
+        x_pol, y_pol : Signal
+            形状为 (1, N_samples) 且 ``n_pol == 1`` 的单偏振信号。
+            两者的采样率、中心频率、sps 和 OFDM 标志必须一致。
+
+        Returns
+        -------
+        Signal
+            形状为 (2, N_samples)、``n_pol == 2`` 的双偏振信号。
+
+        Raises
+        ------
+        ValueError
+            输入形状/偏振态不合法，长度不一致，或上下文参数不兼容。
+        """
+        for name, value in (("x_pol", x_pol), ("y_pol", y_pol)):
+            if value.data.ndim != 2 or value.data.shape[0] != 1 or value.ctx.n_pol != 1:
+                raise ValueError(f"{name} must have shape (1, samples) and n_pol=1.")
+        if x_pol.data.shape[-1] != y_pol.data.shape[-1]:
+            raise ValueError("Polarization signals must have the same sample count.")
+        for attr in ("sample_rate", "center_freq", "sps", "is_ofdm"):
+            if getattr(x_pol.ctx, attr) != getattr(y_pol.ctx, attr):
+                raise ValueError(f"Polarization signals have incompatible {attr}.")
+        ctx = x_pol.ctx.copy()
+        ctx.n_pol = 2
+        ctx.meta.pop("orthogonal_polarization", None)
+        ctx.meta["polarization_multiplexed"] = True
+        return Signal(np.concatenate((x_pol.data, y_pol.data), axis=0), ctx)

@@ -1,16 +1,23 @@
 """MIMO 偏振解复用和信道估计模块。"""
 
+import warnings
+
 import numpy as np
 
 from physics_nlo_eval.core.base import BaseBlock
-from physics_nlo_eval.core.signal import Signal, SignalContext
+from physics_nlo_eval.core.signal import Signal
 
 
 class MIMO_ChannelEstimation(BaseBlock):
     """MIMO 偏振解复用/信道估计模块。
 
     主要用于双偏振系统，通过训练序列 (TS) 或盲均衡算法
-    估计和补偿偏振相关的信道损伤。
+    估计和补偿偏振相关的信道损伤，包括偏振间串扰。
+
+    LS/MMSE 从 ``mimo_training_tx`` / ``mimo_training_rx`` 元数据读取训练数据；
+    对 OFDM 信号也兼容调制器原生的 ``ofdm_ts_pattern`` 与解调器提取的
+    ``ofdm_ts_freq_symbols``。训练数组形状为 ``(n_pol, n_subcarrier, n_obs)``
+    (OFDM) 或 ``(n_pol, n_obs)`` (单载波)。
 
     Parameters
     ----------
@@ -22,6 +29,8 @@ class MIMO_ChannelEstimation(BaseBlock):
         均衡器抽头长度，对于 CMA 等时域均衡器使用。
     cma_mu : float, optional
         CMA 算法的步长 (step size)。
+    regularization : float, optional
+        矩阵求逆的正则化系数，用于改善病态信道下的数值稳定性。
     """
 
     def __init__(
@@ -30,15 +39,20 @@ class MIMO_ChannelEstimation(BaseBlock):
         ts_interval: int = 10,
         equalizer_length: int = 21,
         cma_mu: float = 1e-4,
+        regularization: float = 1e-8,
     ) -> None:
         """初始化 MIMO_ChannelEstimation。"""
+        method = method.upper()
         super().__init__(name=f"MIMO_CE_PD({method})")
-        if method not in ["LS", "MMSE", "CMA"]:
+        if method not in {"LS", "MMSE", "CMA"}:
             raise ValueError(f"Unsupported MIMO channel estimation method: {method}.")
+        if ts_interval <= 0 or equalizer_length <= 0 or cma_mu <= 0 or regularization < 0:
+            raise ValueError("MIMO estimator parameters must be positive.")
         self.method = method
         self.ts_interval = ts_interval
         self.equalizer_length = equalizer_length
         self.cma_mu = cma_mu
+        self.regularization = regularization
 
     def forward(self, signal: Signal) -> Signal:
         """
@@ -55,269 +69,160 @@ class MIMO_ChannelEstimation(BaseBlock):
         -------
         Signal
             解复用后的信号。
-        """
-        if signal.ctx.n_pol == 1:
-            print("Warning: Input signal is single polarization. MIMO processing skipped.")
-            return signal
 
+        Raises
+        ------
+        ValueError
+            偏振轴与上下文不一致，或偏振数既不是 1 也不是 2。
+        """
+        if signal.data.shape[0] != signal.ctx.n_pol:
+            raise ValueError("Signal polarization axis does not match context.")
+        if signal.ctx.n_pol == 1:
+            # 单偏振无需解复用，返回副本以免调用方就地修改共享数据。
+            return Signal(signal.data.copy(), signal.ctx.copy())
+        if signal.ctx.n_pol != 2:
+            raise ValueError("MIMO polarization equalizer currently supports exactly two polarizations.")
         if signal.ctx.is_ofdm:
             return self._ofdm_mimo_processing(signal)
         return self._sc_mimo_processing(signal)
 
+    def _regularizer(self, signal: Signal) -> float:
+        """返回本次求逆使用的正则化系数。"""
+        if self.method == "MMSE":
+            # MMSE 用噪声方差作为正则项；未提供时退回显式配置的正则化系数。
+            return float(signal.ctx.meta.get("noise_variance", self.regularization or 1e-8))
+        return self.regularization
+
+    @staticmethod
+    def _as_ofdm_training(value: object, n_sub: int) -> np.ndarray | None:
+        """把 OFDM 训练数据规整为 (2, n_sub, n_obs) 形状。"""
+        if value is None:
+            return None
+        array = np.asarray(value)
+        if array.ndim == 2 and array.shape == (2, n_sub):
+            return array[:, :, None]
+        if array.ndim == 3 and array.shape[:2] == (2, n_sub):
+            return array
+        raise ValueError("OFDM MIMO training must have shape (2, n_sub) or (2, n_sub, n_obs).")
+
     def _ofdm_mimo_processing(self, signal: Signal) -> Signal:
-        """OFDM 信号的 MIMO 处理 (信道估计和解复用)。"""
-        n_pol, n_subcarriers, n_symbols = signal.data.shape
-        demuxed_data = np.empty_like(signal.data)
+        """OFDM 信号的 MIMO 处理 (逐子载波 2x2 信道估计和解复用)。
 
-        # Retrieve TX training sequence from metadata
-        tx_ts_pattern = signal.ctx.meta.get("ofdm_ts_pattern")
-        ts_locations = signal.ctx.meta.get("ofdm_ts_locations", [])  # (frame_idx, start_sample_in_frame)
-
-        if tx_ts_pattern is None or not ts_locations:
-            print(
-                "Warning: No TX training sequence found in metadata for OFDM. "
-                "LS/MMSE channel estimation may not be possible. Falling back to simple identity matrix."
+        对每个子载波用 LS/MMSE 求解完整的 2x2 信道矩阵：
+        ``H = Y X^H (X X^H + reg I)^{-1}``，再取伪逆作为均衡器。
+        与只做对角近似、忽略偏振串扰的做法不同，这里会估计并抵消
+        非对角项。
+        """
+        if signal.data.ndim != 3:
+            raise ValueError("OFDM MIMO input must have shape (2, n_sub, n_symbols).")
+        _, n_sub, _ = signal.data.shape
+        meta = signal.ctx.meta
+        tx = self._as_ofdm_training(meta.get("mimo_training_tx", meta.get("ofdm_ts_pattern")), n_sub)
+        rx = self._as_ofdm_training(meta.get("mimo_training_rx", meta.get("ofdm_ts_freq_symbols")), n_sub)
+        if tx is None or rx is None:
+            warnings.warn(
+                "No complete OFDM MIMO training pair; signal was left unchanged.", RuntimeWarning, stacklevel=2
             )
-            # If no TS, then assume identity or use blind methods
-            H_inv = np.zeros((n_pol, n_pol, n_subcarriers), dtype=np.complex64)
-            for sc_idx in range(n_subcarriers):
-                H_inv[:, :, sc_idx] = np.eye(n_pol)
+            return Signal(signal.data.copy(), signal.ctx.copy())
+        # 一侧只有单个观测时按另一侧重复，使两者观测数对齐。
+        if tx.shape[2] == 1 and rx.shape[2] > 1:
+            tx = np.repeat(tx, rx.shape[2], axis=2)
+        if rx.shape[2] == 1 and tx.shape[2] > 1:
+            rx = np.repeat(rx, tx.shape[2], axis=2)
+        if tx.shape[2] != rx.shape[2]:
+            raise ValueError("TX and RX MIMO training observation counts differ.")
 
-            # Apply identity to all symbols
-            for sym_idx in range(n_symbols):
-                for sc_idx in range(n_subcarriers):
-                    rx_vec = signal.data[:, sc_idx, sym_idx]  # Shape (n_pol,)
-                    demuxed_data[:, sc_idx, sym_idx] = H_inv[:, :, sc_idx] @ rx_vec  # H_inv * Y
-            return Signal(data=demuxed_data, ctx=signal.ctx)
-
-        # Assuming tx_ts_pattern is (n_pol, n_subcarriers)
-        # Assuming TS symbols are inserted periodically.
-
-        # LS/MMSE for OFDM works per subcarrier.
-        # Estimate H matrix for each subcarrier using received TS.
-
-        estimated_H: np.ndarray = np.zeros((n_pol, n_pol, n_subcarriers), dtype=np.complex64)
-
-        # For each subcarrier, we need RX TS and TX TS to estimate H
-        # Y_ts = H * X_ts + N
-        # If we have multiple TS symbols, average over them for better estimate.
-
-        # Find actual received TS symbols (this needs to be robust)
-        # For simplicity, assume first symbol of every `ts_interval` is a TS
-        tx_ts_sym = tx_ts_pattern  # This is for one TS symbol
-
-        num_ts_symbols = 0
-        rx_ts_symbols_list: list[np.ndarray] = []  # List of (n_pol, n_subcarriers)
-
-        for sym_idx in range(n_symbols):
-            # This logic needs to align with how TS were inserted in OFDMModulator
-            if (sym_idx % self.ts_interval == 0) and sym_idx * (
-                signal.ctx.meta["ofdm_fft_size"] + signal.ctx.meta["ofdm_cp_len"]
-            ) in [loc[1] for loc in ts_locations]:
-                rx_ts_symbols_list.append(signal.data[:, :, sym_idx])
-                num_ts_symbols += 1
-
-        if num_ts_symbols == 0:
-            print(
-                "Warning: No TS symbols found in received OFDM data for channel estimation. "
-                "Falling back to identity matrix."
-            )
-            H_inv = np.zeros((n_pol, n_pol, n_subcarriers), dtype=np.complex64)
-            for sc_idx in range(n_subcarriers):
-                H_inv[:, :, sc_idx] = np.eye(n_pol)
-        else:
-            rx_ts_avg = np.mean(np.stack(rx_ts_symbols_list, axis=2), axis=2)  # Average over TS symbols
-
-            # Estimate H_hat per subcarrier (Y = H * X => H = Y * X^-1)
-            # Y and X are 2x1 vectors for each subcarrier
-            # H is 2x2 matrix for each subcarrier
-
-            # For each subcarrier
-            for sc_idx in range(n_subcarriers):
-                y_sc = rx_ts_avg[:, sc_idx]  # Rx TS for this subcarrier: (2,)
-                x_sc = tx_ts_sym[:, sc_idx]  # Tx TS for this subcarrier: (2,)
-
-                # Construct Y_vec = H * X_vec
-                # [y_x] = [h_xx h_xy] [x_x]
-                # [y_y]   [h_yx h_yy] [x_y]
-                # To solve for H, we need a "matrix" of X, or multiple (X, Y) pairs.
-                # A single (X,Y) pair gives 2 equations for 4 unknowns.
-                # Typically, TX transmits orthogonal pilots or known sequence over time/subcarriers.
-                # Here, we assume tx_ts_sym is a known 2x1 vector.
-
-                # Simplified LS estimation (assuming independent polarizations for pilots for this example)
-                # If X_sc is a known vector, Y_sc = H * X_sc.
-                # This needs to be done carefully. A more robust way is to use a 2x2 TX pilot matrix over two symbols.
-
-                # If X_sc is actually a *matrix* of known pilots, then H = Y_sc @ np.linalg.inv(X_sc).
-                # For DP, we usually use two distinct pilots for X and Y, e.g., [1, 0] and [0, 1] over two time slots.
-
-                # Simplistic approximation: If x_sc is a single 2x1 vector, assume
-                # H_xx = y_x / x_x, H_yy = y_y / x_y, H_xy = H_yx = 0 (no crosstalk)
-                # This is a very poor estimate.
-
-                # Let's assume tx_ts_sym[0, sc_idx] is X_TX, tx_ts_sym[1, sc_idx] is Y_TX
-                # And we receive rx_ts_avg[0, sc_idx] as X_RX, rx_ts_avg[1, sc_idx] as Y_RX
-                # For LS estimation, we need the TX "channel sounding" matrix X
-
-                # Assuming `tx_ts_sym` is meant to be the *actual QAM symbols* transmitted on the TS (2, n_subcarriers)
-                # To estimate H, we usually transmit X_tx = [[X_pilot, 0], [0, Y_pilot]] or similar orthogonal setup.
-
-                # Placeholder: Assume the ideal case where X_tx is [1,0] and [0,1] for specific subcarriers or symbols
-                # We can't form a 2x2 inverse from a single 2x1 X_sc.
-                # For a 2x2 H matrix, we need two linearly independent inputs (e.g., [1,0] and [0,1])
-                # on X and Y polarization to estimate the 4 components.
-
-                # Let's assume `tx_ts_sym` is effectively a 2x2 matrix for each subcarrier for simpler illustration
-                # E.g., [[tx_x_p1, tx_x_p2], [tx_y_p1, tx_y_p2]] over two time slots or two subcarriers
-                # For this general framework, we'll keep a placeholder.
-
-                # A common LS estimate for each subcarrier:
-                # If we have (Y_ts_k, X_ts_k) for k=1...N_ts,
-                # then H_hat = (sum Y_ts_k X_ts_k^H) (sum X_ts_k X_ts_k^H)^-1
-                # Where Y_ts_k, X_ts_k are 2x1 vectors.
-
-                # Simplest working LS for DP (assuming TX TS is the true symbols):
-                # For each subcarrier, Y_rx = H_sc @ X_tx
-                # We need to reshape tx_ts_sym and rx_ts_avg for this.
-                # H_sc = Y_rx @ pinv(X_tx)
-
-                # Assuming X_tx_matrix = [[tx_ts_sym[0,sc_idx], 0], [0, tx_ts_sym[1,sc_idx]]]
-                # And Y_rx_matrix = [[rx_ts_avg[0,sc_idx], 0], [0, rx_ts_avg[1,sc_idx]]]
-                # This isn't strictly correct for a full 2x2 H.
-
-                # For now, a simple direct inversion per polarization for simplicity.
-                # This implies no inter-polarization crosstalk.
-                if np.abs(tx_ts_sym[0, sc_idx]) > 1e-6:
-                    estimated_H[0, 0, sc_idx] = rx_ts_avg[0, sc_idx] / tx_ts_sym[0, sc_idx]
-                else:
-                    estimated_H[0, 0, sc_idx] = 1.0  # Default if TX is zero
-
-                if np.abs(tx_ts_sym[1, sc_idx]) > 1e-6:
-                    estimated_H[1, 1, sc_idx] = rx_ts_avg[1, sc_idx] / tx_ts_sym[1, sc_idx]
-                else:
-                    estimated_H[1, 1, sc_idx] = 1.0
-
-                # Assume off-diagonals are zero for this simplified LS.
-                # To get full H, you need to transmit two different (or orthogonal)
-                # pilot symbols in the two polarizations over at least two distinct time/frequency instances.
-
-        # Now, invert H to get H_inv (or use MMSE estimator)
-        H_inv_matrix = np.zeros_like(estimated_H)
-        for sc_idx in range(n_subcarriers):
-            H_sc = estimated_H[:, :, sc_idx]
-            if np.linalg.det(H_sc) > 1e-9:  # Check for invertibility
-                H_inv_matrix[:, :, sc_idx] = np.linalg.inv(H_sc)
+        h_est = np.empty((2, 2, n_sub), dtype=np.complex128)
+        equalizer = np.empty_like(h_est)
+        reg = self._regularizer(signal)
+        eye = np.eye(2)
+        for k in range(n_sub):
+            x = tx[:, k, :]
+            y = rx[:, k, :]
+            gram = x @ x.conj().T
+            if np.linalg.matrix_rank(gram) < 2:
+                # 训练观测不足以唯一确定 2x2 信道，退化为逐偏振对角估计。
+                diagonal = np.ones(2, dtype=np.complex128)
+                for pol in range(2):
+                    denom = np.vdot(x[pol], x[pol]).real
+                    if denom > 0:
+                        diagonal[pol] = np.vdot(x[pol], y[pol]) / denom
+                h_est[:, :, k] = np.diag(diagonal)
             else:
-                H_inv_matrix[:, :, sc_idx] = np.eye(n_pol)  # Fallback to identity if singular
+                h_est[:, :, k] = y @ x.conj().T @ np.linalg.inv(gram + reg * eye)
+            equalizer[:, :, k] = np.linalg.pinv(h_est[:, :, k], rcond=max(reg, 1e-12))
 
-        # Apply H_inv to all data symbols (and potentially TS symbols if they need to be equalized)
-        for sym_idx in range(n_symbols):
-            for sc_idx in range(n_subcarriers):
-                rx_vec = signal.data[:, sc_idx, sym_idx]  # (2,) vector
-                demuxed_data[:, sc_idx, sym_idx] = H_inv_matrix[:, :, sc_idx] @ rx_vec  # H_inv * Y
-
-        new_ctx = SignalContext(
-            sample_rate=signal.ctx.sample_rate,
-            center_freq=signal.ctx.center_freq,
-            n_pol=n_pol,
-            sps=signal.ctx.sps,
-            sym_rate=signal.ctx.sym_rate,
-            bits_per_symbol=signal.ctx.bits_per_symbol,
-            is_ofdm=True,
-            meta={
-                **(signal.ctx.meta or {}),
+        output = np.einsum("abk,bks->aks", equalizer, signal.data, optimize=True)
+        ctx = signal.ctx.copy()
+        ctx.meta.update(
+            {
                 "mimo_ofdm_demuxed": True,
-                "ofdm_channel_estimated_H": estimated_H,
-            },
+                "ofdm_channel_estimated_H": h_est,
+                "mimo_equalizer": equalizer,
+                "mimo_method": self.method,
+            }
         )
-        return Signal(data=demuxed_data, ctx=new_ctx)
+        return Signal(output.astype(signal.data.dtype, copy=False), ctx)
 
     def _sc_mimo_processing(self, signal: Signal) -> Signal:
-        """单载波 (SC) 信号的 MIMO 处理 (盲均衡)。"""
-        n_pol, num_samples = signal.data.shape
-        demuxed_data = np.empty_like(signal.data)
+        """单载波 (SC) 信号的 MIMO 处理。
 
-        # For SC, CMA (Constant Modulus Algorithm) or MMA (Multi-Modulus Algorithm) is common.
-        # This involves an adaptive equalizer (e.g., 2x2 FIR filter matrix).
-
-        # Placeholder for CMA algorithm (simplified)
-        # Initialize equalizer matrix (e.g., identity with zeros for off-diagonals)
-        # Assuming an ideal 2x2 equalizer for now (no time domain taps, just 2x2 matrix)
-        # For a full CMA, you need a 2x2 filter with length `equalizer_length`.
-        # This implies a time-domain processing.
-
-        # Simple 2x2 matrix processing (ignoring ISI for now)
-        equalizer_matrix = np.eye(n_pol, dtype=np.complex64)  # Start with identity
-
-        # CMA cost function: J = E[(|y_x|^2 - R)^2 + (|y_y|^2 - R)^2]
-        # R is the constant modulus target (e.g., for QPSK, R=1 if normalized)
-        R = 1.0  # Target modulus, assuming normalized QAM
-
-        # Loop through symbols to adapt the equalizer (very simplified loop)
-        # In practice, this would involve block-wise processing or symbol-by-symbol with filter taps.
-
-        # Example: One-shot equalization with a single 2x2 matrix (ignoring ISI)
-        # This is a highly simplified CMA, essentially just trying to de-rotate.
-        # A full CMA needs an adaptive filter.
-
+        ``method='CMA'`` 走盲均衡 (:meth:`_cma`)；LS/MMSE 则用训练序列
+        做一次 2x2 最小二乘信道估计并求逆。
+        """
+        if signal.data.ndim != 2:
+            raise ValueError("Single-carrier MIMO input must have shape (2, samples).")
         if self.method == "CMA":
-            # For a true CMA, you'd have W(z) matrix of FIR filters.
-            # Y_hat = W @ X_rx
-            # For simplicity here, let's treat it as a single 2x2 matrix
-
-            # This is a very basic gradient update without full filter structure.
-            # It will attempt to rotate and scale, but not truly remove ISI or PMD.
-            for sample_idx in range(num_samples):
-                # Input sample vector
-                rx_vec = signal.data[:, sample_idx]  # (2,)
-
-                # Output sample vector
-                output_vec = equalizer_matrix @ rx_vec  # (2,)
-
-                # CMA error for each polarization
-                e_x = output_vec[0] * (np.abs(output_vec[0]) ** 2 - R)
-                e_y = output_vec[1] * (np.abs(output_vec[1]) ** 2 - R)
-
-                # Update equalizer matrix (simplified: update single 2x2 matrix)
-                # J = |y_x|^2 - R + |y_y|^2 - R
-                # W_new = W - mu * dJ/dW^*
-                # dJ/dW^* ~ y_x * (y_x^2 - R) * x^*
-
-                # Simplified update (treating as 2x1 input vector update, not full matrix)
-                # This is more like two independent CMAs per pol, ignoring cross-polarization.
-                # Full 2x2 CMA: W_k+1 = W_k - mu * (y_k y_k^H - R I) y_k x_k^H (this is complex)
-
-                # A more common form of CMA update for a 2x2 filter:
-                # E = (abs(y)^2 - R) * y
-                # W_new = W_old - mu * E * x_conj
-
-                # For simplified single-tap 2x2 matrix:
-                error_vec = np.array([e_x, e_y], dtype=np.complex64)
-                equalizer_matrix = equalizer_matrix - self.cma_mu * np.outer(error_vec, rx_vec.conj())
-
-                demuxed_data[:, sample_idx] = output_vec
-        else:  # Default if no CMA, or for "LS" in SC (which is rare, usually DD-LMS or CMA)
-            # Just pass through with identity matrix
-            demuxed_data = signal.data.copy()
-            print(
-                f"Warning: Single-carrier MIMO processing with method "
-                f"'{self.method}' is a placeholder. "
-                "No actual equalization performed."
-            )
-
-        new_ctx = SignalContext(
-            sample_rate=signal.ctx.sample_rate,
-            center_freq=signal.ctx.center_freq,
-            n_pol=n_pol,
-            sps=signal.ctx.sps,
-            sym_rate=signal.ctx.sym_rate,
-            bits_per_symbol=signal.ctx.bits_per_symbol,
-            is_ofdm=signal.ctx.is_ofdm,
-            meta={
-                **(signal.ctx.meta or {}),
+            return self._cma(signal)
+        tx = signal.ctx.meta.get("mimo_training_tx")
+        rx = signal.ctx.meta.get("mimo_training_rx")
+        if tx is None:
+            warnings.warn("No single-carrier MIMO training; signal was left unchanged.", RuntimeWarning, stacklevel=2)
+            return Signal(signal.data.copy(), signal.ctx.copy())
+        x = np.asarray(tx)
+        y = np.asarray(rx) if rx is not None else signal.data[:, : x.shape[-1]]
+        if x.ndim != 2 or y.ndim != 2 or x.shape[0] != 2 or y.shape != x.shape:
+            raise ValueError("Single-carrier MIMO training arrays must have equal shape (2, n_obs).")
+        reg = self._regularizer(signal)
+        h_est = y @ x.conj().T @ np.linalg.inv(x @ x.conj().T + reg * np.eye(2))
+        equalizer = np.linalg.pinv(h_est, rcond=max(reg, 1e-12))
+        output = equalizer @ signal.data
+        ctx = signal.ctx.copy()
+        ctx.meta.update(
+            {
                 "mimo_sc_demuxed": True,
-                "sc_equalizer_method": self.method,
-            },
+                "mimo_channel_estimated_H": h_est,
+                "mimo_equalizer": equalizer,
+                "mimo_method": self.method,
+            }
         )
-        return Signal(data=demuxed_data, ctx=new_ctx)
+        return Signal(output.astype(signal.data.dtype, copy=False), ctx)
+
+    def _cma(self, signal: Signal) -> Signal:
+        """蝶形 FIR 常模自适应均衡。
+
+        注意与旧实现的区别：这里是对 ``equalizer_length`` 个抽头做真正的
+        FIR 滤波 (旧实现只用单个 2x2 抽头，``equalizer_length`` 形同虚设)，
+        且模值参考 R 由信号的四阶矩推出，而非固定为 1。
+        """
+        length = self.equalizer_length
+        center = length // 2
+        taps = np.zeros((2, 2, length), dtype=np.complex128)
+        # 初始化为对角延迟线，使均衡器起步时是一个带延迟的单位阵。
+        taps[0, 0, center] = taps[1, 1, center] = 1
+        padded = np.pad(signal.data, ((0, 0), (length - 1, 0)))
+        output = np.empty_like(signal.data, dtype=np.complex128)
+        p2 = np.mean(np.abs(signal.data) ** 2)
+        # CMA 的模值参考 R = E[|x|^4] / E[|x|^2]。
+        target = np.mean(np.abs(signal.data) ** 4) / max(p2, np.finfo(float).eps)
+        for index in range(signal.data.shape[1]):
+            vector = padded[:, index : index + length][:, ::-1]
+            value = np.einsum("pql,ql->p", taps, vector)
+            output[:, index] = value
+            error = (np.abs(value) ** 2 - target) * value
+            # 按输入能量归一化步长，避免深衰落处发散。
+            norm = np.sum(np.abs(vector) ** 2) + 1e-12
+            taps -= self.cma_mu * np.einsum("p,ql->pql", error, vector.conj()) / norm
+        ctx = signal.ctx.copy()
+        ctx.meta.update({"mimo_sc_demuxed": True, "mimo_equalizer_taps": taps, "mimo_method": "CMA"})
+        return Signal(output.astype(signal.data.dtype, copy=False), ctx)

@@ -54,8 +54,10 @@ def run_simulation() -> None:
     # Fiber parameters
     fiber_length_km = 80.0
     fiber_alpha_db_per_km = 0.2
-    fiber_beta2_ps2_per_m = -21.6e-27
-    fiber_beta3_ps3_per_m = 0.12e-39
+    # 注意单位：FiberChannel 的这两个参数按 per-km 取值，
+    # 旧代码传入 per-metre 量级 (-21.6e-27)，数值偏差 10^3。
+    fiber_beta2_ps2_per_km = -21.6
+    fiber_beta3_ps3_per_km = 0.12
     fiber_d_pmd_ps_per_sqrt_km = 0.1  # ps/sqrt(km)
 
     # EDFA parameters
@@ -69,7 +71,7 @@ def run_simulation() -> None:
     # --- 1. 发送端 (TX) ---
     print("\n--- TX Chain ---")
     tx_pipeline_blocks = [
-        Mapper(modulation=modulation_format, power_norm=True),
+        Mapper(modulation=modulation_format, power_norm=True, sym_rate=symbol_rate_baud),
     ]
 
     if is_ofdm_system:
@@ -89,7 +91,7 @@ def run_simulation() -> None:
         # If not OFDM, a pulse shaping filter would be here (e.g., RRC)
         # For simplicity, we skip pulse shaping in this example for non-OFDM.
 
-    tx_pipeline_blocks.append(IQModulator(optical_power_per_pol_mw=10.0, wavelength_nm=optical_wavelength_nm))
+    tx_pipeline_blocks.append(IQModulator(launch_power_dbm_per_pol=0.0, wavelength_nm=optical_wavelength_nm))
     # PolarizationMultiplexer might be implicit in IQModulator if it directly outputs DP.
     # If not, you'd add PolarizationMultiplexer here for SP inputs to form DP.
     # tx_pipeline_blocks.append(PolarizationMultiplexer()) # If Mapper/IQModulator output SP
@@ -107,7 +109,8 @@ def run_simulation() -> None:
         f"Sample Rate {tx_optical_signal.ctx.sample_rate / 1e9:.2f} GSa/s, "
         f"Center Freq {tx_optical_signal.ctx.center_freq / 1e12:.2f} THz"
     )
-    print(f"TX Signal Average Power (per pol): {np.mean(np.abs(tx_optical_signal.data) ** 2):.2f} mW")
+    # IQModulator 输出的幅度单位是 sqrt(W)，故 |data|^2 是瓦，需 ×1e3 转 mW。
+    print(f"TX Signal Average Power (per pol): {np.mean(np.abs(tx_optical_signal.data) ** 2) * 1e3:.2f} mW")
     tx_ideal_symbols = tx_pipeline.blocks[0].forward(tx_bits)  # Capture ideal symbols from Mapper
 
     # --- 2. 信道 (Channel) ---
@@ -117,10 +120,13 @@ def run_simulation() -> None:
             FiberChannel(
                 length_m=fiber_length_km * 1000,
                 alpha_db_per_km=fiber_alpha_db_per_km,
-                beta2_ps2_per_km=fiber_beta2_ps2_per_m,
-                beta3_ps3_per_km=fiber_beta3_ps3_per_m,
+                beta2_ps2_per_km=fiber_beta2_ps2_per_km,
+                beta3_ps3_per_km=fiber_beta3_ps3_per_km,
                 d_pmd_ps_per_sqrt_km=fiber_d_pmd_ps_per_sqrt_km,
                 coarse_step_size_m=10000.0,  # 10 km step
+                # ManakovEquation.from_fiber 只接受 CuPy (GPU) 上下文，
+                # CPU/MKLFFT 后端会直接 RuntimeError。
+                compute_ctx_name="cupy",
             ),
             EDFA(gain_db=edfa_gain_db, nf_db=edfa_nf_db),
         ],
@@ -133,7 +139,7 @@ def run_simulation() -> None:
         f"Sample Rate {rx_optical_signal.ctx.sample_rate / 1e9:.2f} GSa/s, "
         f"Center Freq {rx_optical_signal.ctx.center_freq / 1e12:.2f} THz"
     )
-    print(f"RX Signal Average Power (per pol): {np.mean(np.abs(rx_optical_signal.data) ** 2):.2f} mW")
+    print(f"RX Signal Average Power (per pol): {np.mean(np.abs(rx_optical_signal.data) ** 2) * 1e3:.2f} mW")
 
     # --- 3. 接收前端 (RX Front-end) ---
     print("\n--- RX Front-end Chain ---")
@@ -178,12 +184,14 @@ def run_simulation() -> None:
         rx_dsp_pipeline_blocks.append(OFDM_Demodulator(n_subcarriers=ofdm_n_subcarriers, cp_len=ofdm_cp_len))
         # Frequency Domain DSP for OFDM
         rx_dsp_pipeline_blocks.append(MIMO_ChannelEstimation(method="LS", ts_interval=10))  # Using TS for CE
-        rx_dsp_pipeline_blocks.append(CommonPhaseNoiseCompensate(method="BPS"))  # Or pilot_assisted for OFDM
-        rx_dsp_pipeline_blocks.append(PhaseNoiseCompensation(method="BPS"))  # Or pilot_assisted
+        # OFDM 的相位恢复由 CommonPhaseNoiseCompensate (CPE) 完成；
+        # PhaseNoiseCompensation 是单载波专用块，对 OFDM 信号会报错。
+        rx_dsp_pipeline_blocks.append(CommonPhaseNoiseCompensate(method="pilot_assisted"))
     else:
         # Single-carrier DSP
+        # 注意：CommonPhaseNoiseCompensate 是 OFDM 专用 (common phase error) 块，
+        # 对非 OFDM 信号会直接报错；单载波相位恢复用下面的 PhaseNoiseCompensation。
         rx_dsp_pipeline_blocks.append(MIMO_ChannelEstimation(method="CMA", equalizer_length=11, cma_mu=1e-4))
-        rx_dsp_pipeline_blocks.append(CommonPhaseNoiseCompensate(method="data_aided"))
         rx_dsp_pipeline_blocks.append(PhaseNoiseCompensation(method="V&V"))  # BPS or V&V for SC
 
     rx_dsp_pipeline = Pipeline(rx_dsp_pipeline_blocks, name="RX_DSP_Pipeline")

@@ -40,6 +40,10 @@ class OFDMModulator(BaseBlock):
         super().__init__(name="OFDMModulator")
         if not n_subcarriers > 0:
             raise ValueError("Number of subcarriers must be positive.")
+        if cp_len < 0:
+            raise ValueError("CP length must be non-negative.")
+        if num_data_symbols_per_frame <= 0:
+            raise ValueError("Number of data symbols per frame must be positive.")
         if pilot_spacing < 0:
             raise ValueError("Pilot spacing must be non-negative.")
 
@@ -77,7 +81,8 @@ class OFDMModulator(BaseBlock):
             添加 CP 后的时域 OFDM 符号 (fft_size + cp_len,).
         """
         time_domain_symbol = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(freq_domain_symbol))) * self.n_subcarriers
-        cp = time_domain_symbol[-self.cp_len :]
+        # cp_len == 0 时 [-0:] 会取到整个符号（Python 负数零切片陷阱），必须显式给空切片。
+        cp = time_domain_symbol[-self.cp_len :] if self.cp_len else time_domain_symbol[:0]
         ofdm_symbol_with_cp = np.concatenate((cp, time_domain_symbol))
         return ofdm_symbol_with_cp
 
@@ -206,8 +211,10 @@ class WindowedOFDMModulator(OFDMModulator):
         self.beta = beta
         # Cyclic Suffix length (CS): typically beta * FFT_size
         self.cs_len = int(np.round(self.n_subcarriers * self.beta))
-        if self.cs_len >= self.cp_len + self.fft_size:
-            raise ValueError("CS length too large, must be less than symbol duration.")
+        # 重叠-相加 (OLA) 要求窗的上升沿不短于 CP，否则相邻符号的尾巴叠不满，
+        # 窗不再满足 COLA。判据是 CS <= CP，而不是 CS < 符号总长。
+        if self.cs_len > self.cp_len:
+            raise ValueError("Window overlap (round(beta * n_subcarriers)) must not exceed CP length.")
 
         # Total length of an OFDM symbol for windowing (CP + FFT_size + CS)
         self.extended_symbol_len = self.cp_len + self.fft_size + self.cs_len
@@ -218,105 +225,23 @@ class WindowedOFDMModulator(OFDMModulator):
         self._window = self._generate_raised_cosine_window()
 
     def _generate_raised_cosine_window(self) -> np.ndarray:
-        """生成升余弦窗函数。"""
-        L = self.extended_symbol_len
-        window = np.ones(L, dtype=np.float64)
+        """生成满足 COLA 的升余弦窗。
 
-        # Rising edge (at the end of CS overlap part, beginning of CP)
-        # This part should be flat (1.0) in the middle (FFT_size)
-        # Tapering happens in CP and CS regions.
+        重叠-相加 (OLA) 要求相邻窗在重叠区逐点相加恒为 1（constant overlap-add），
+        否则 W-OFDM 的子载波正交性会被破坏，等效于引入符号间干扰。
 
-        # Define the transition region length (CP_len and CS_len are the transition zones)
-        cp_transition_len = self.cp_len
-        cs_transition_len = self.cs_len
-
-        # Construct the raised cosine window
-        # First part (CP region)
-        t_cp = np.arange(cp_transition_len)
-        window[:cp_transition_len] = 0.5 * (1 - np.cos(np.pi * t_cp / cp_transition_len))
-
-        # Middle part (FFT_size region) is already 1.0
-
-        # Last part (CS region)
-        t_cs = np.arange(cs_transition_len)
-        window[self.cp_len + self.fft_size : self.extended_symbol_len] = 0.5 * (
-            1 + np.cos(np.pi * t_cs / cs_transition_len)
-        )
-
-        # Normalization to ensure total energy is preserved after windowing
-        # The sum of squares of window should be sqrt(effective_output_sym_len / extended_symbol_len) to keep power
-        # Or, usually, we normalize to sum of squares = 1 for the window itself
-        # For OLA, the window needs to satisfy certain properties (sum of overlapping windows = 1)
-        # A common window for W-OFDM uses a 'trapezoidal' raised-cosine with flat center and RC tails.
-        # For simplicity, we create a window that's 1 in the data part and tapers in CP/CS.
-
-        # A common implementation for W-OFDM uses a symmetric window:
-        # The window length is N_fft + N_cp + N_cs
-        # The flat part is N_fft - 2*N_guard
-        # The roll-off is 2*N_guard = N_cp + N_cs
-
-        # This simpler window just tapers the CP and CS parts, assuming the core (FFT_size) is flat.
-        # This is essentially a "cyclic prefix/suffix windowing"
-
-        # A more robust window for OLA that sums to 1:
-        # For the first cs_len samples: window_rising
-        # For the middle part (cp_len to cp_len+fft_size-cs_len-cp_len): window_flat
-        # For the last cp_len samples: window_falling
-
-        # Let's use a simpler window for now: flat over FFT_size, RC over CP_len and CS_len
-        # which means the total effective symbol length becomes N_fft + N_cp
-        # and N_cs samples from current symbol overlaps with N_cp samples from next symbol.
-
-        # Let's assume CP and CS are the "tapering regions"
-
-        # Create a window for a symbol of length (fft_size + cp_len + cs_len)
-        # Tapering up at the start (length cs_len) and tapering down at the end (length cp_len)
-        # The middle section (from cs_len to L - cp_len) is flat (value 1)
-
-        # The standard definition for OLA window is such that
-        # w_k(t) + w_{k-1}(t + (N_fft + N_cp)) = 1
-        # which means sum of window at current pos and shifted window at current pos is 1
-        # This implies a more complex window shape than a simple "trapezoid".
-
-        # For simplicity of this demonstration, we'll use a window that tapers only
-        # on the CP and CS parts, and the middle (FFT_size) is flat.
-        # The window for the full (CP + FFT + CS) symbol:
-        # 1. First `cp_len` samples are the tail of the window of the PREVIOUS symbol.
-        # 2. Last `cs_len` samples are the head of the window of the NEXT symbol.
-        # The window applies to `current_ofdm_symbol_time_extended = CP + IFFT_data + CS`
-
-        # Window for a single extended symbol (CP + FFT_SIZE + CS)
-        win = np.ones(self.extended_symbol_len, dtype=np.complex128)  # Must be complex due to operations
-        # Rising edge over CS_LEN (which will be at the *end* of the symbol)
-        # and falling edge over CP_LEN (which is at the *beginning* of the symbol)
-
-        # Let's consider a trapezoidal window.
-        # The total active part of an OFDM symbol is N_FFT + N_CP.
-        # For windowed OFDM, we extend this to N_FFT + N_CP + N_CS.
-        # The window ramps up over N_CS, stays flat, then ramps down over N_CP.
-        # This is for a symbol (CP_reduced + FFT + CS_reduced), then OLA.
-        # The `fft_size + cp_len` is the effective symbol length after OLA.
-
-        # The general approach: a raised cosine window `w(t)` of length `L_total_symbol`
-        # where `L_total_symbol = N_FFT + N_CP + N_CS`.
-        # The window has flat part `N_FFT - (N_CP + N_CS)` and two raised-cosine tails.
-        # In this simplified implementation, we'll assume `N_CP` and `N_CS` are the tails.
-        # Let's try a window that is 1.0 in the data region and tapers in CP/CS.
-
-        # The transition regions are the first `cp_len` and last `cs_len` samples.
-        # The window has length `extended_symbol_len = cp_len + fft_size + cs_len`.
-
-        # Start tapering (left tail)
-        left_taper_len = self.cp_len
-        t_left = np.arange(left_taper_len)
-        win[:left_taper_len] = 0.5 * (1 + np.cos(np.pi * (t_left / left_taper_len - 1)))
-
-        # End tapering (right tail)
-        right_taper_len = self.cs_len
-        t_right = np.arange(right_taper_len)
-        win[self.extended_symbol_len - right_taper_len :] = 0.5 * (1 + np.cos(np.pi * (t_right / right_taper_len)))
-
-        return win
+        旧实现只把 CP 段和 CS 段各自做一条升余弦斜坡，两条斜坡之和在重叠区
+        并不恒为 1；这里改用一对互补的半余弦：前半段取 ``sin²``、后半段取
+        ``cos²``，由 ``sin²θ + cos²θ = 1`` 保证重叠区严格求和为 1。中间
+        ``fft_size`` 段保持 1.0。
+        """
+        window = np.ones(self.extended_symbol_len, dtype=np.float64)
+        if self.cs_len:
+            # 相位取半格偏移 (+0.5)，避免窗口端点落在 0 而损失首尾样点能量。
+            phase = np.pi * (np.arange(self.cs_len) + 0.5) / (2 * self.cs_len)
+            window[: self.cs_len] = np.sin(phase) ** 2
+            window[-self.cs_len :] = np.cos(phase) ** 2
+        return window
 
     def forward(self, symbols: Signal) -> Signal:
         """将 QAM 符号流转换为加窗 OFDM 时域信号。"""
@@ -341,12 +266,6 @@ class WindowedOFDMModulator(OFDMModulator):
 
         for pol_idx in range(n_pol):
             pol_qam_data = symbols.data[pol_idx, :]
-            pol_time_series_symbols: list[np.ndarray] = []  # List of individual (CP+IFFT+CS) windowed symbols
-
-            # Initialize an empty buffer for Overlap-and-Add (OLA)
-            ola_buffer = np.zeros(self.extended_symbol_len, dtype=np.complex64)
-            # This buffer needs to accumulate overlapped parts
-
             current_qam_symbol_idx = 0
             current_output_time_series = np.array([], dtype=np.complex64)
 
@@ -413,9 +332,14 @@ class WindowedOFDMModulator(OFDMModulator):
                 # The last 'cs_len' samples of current symbol overlap with the first 'cp_len' samples of next.
                 # Here, we add the overlapping tail of the previous symbol to the head of the current symbol.
 
-                # If this is the first symbol, just append the full windowed symbol
-                if sym_global_idx == 0:
-                    current_output_time_series = windowed_symbol
+                # If this is the first symbol, just append the full windowed symbol.
+                # cs_len == 0 时没有重叠区，后续符号直接首尾相接即可；否则下面的
+                # [-0:] 切片会取到整段并造成形状错位。
+                if sym_global_idx == 0 or self.cs_len == 0:
+                    if sym_global_idx == 0:
+                        current_output_time_series = windowed_symbol
+                    else:
+                        current_output_time_series = np.concatenate((current_output_time_series, windowed_symbol))
                 else:
                     # Overlap: the last 'cs_len' samples of the previous *effective* symbol (before windowing)
                     # will be merged with the first 'cp_len' samples of the current windowed symbol.
@@ -503,6 +427,8 @@ class WindowedOFDMModulator(OFDMModulator):
 
         # 截断最后一个符号多出的 CS 尾巴，使输出长度对齐有效符号长度
         # 这样做在连续传输模拟中更方便，且不会损失信息（因为信息在前面的 FFT 窗里）
-        final_data = np.stack(ofdm_output_list, axis=0)[:, : -self.cs_len]
+        # cs_len == 0 时 [: -0] 会截成空数组，必须退化为不截断。
+        stacked = np.stack(ofdm_output_list, axis=0)
+        final_data = stacked[:, : -self.cs_len] if self.cs_len else stacked
 
         return Signal(data=final_data.astype(np.complex64), ctx=new_ctx)

@@ -1,15 +1,24 @@
 """光纤信道模拟，集成 PyNLO。"""
 
+from __future__ import annotations
+
+import warnings
 from typing import Any
 
 import numpy as np
-from pynlo.backends import get_cupy_context, get_numpy_context
-from pynlo.physics.equations.manakov import ManakovEquation
-from pynlo.physics.field import FieldState
-from pynlo.physics.grid import Grid
-from pynlo.physics.solvers import Propagator
-from pynlo.physics.solvers.adaptive import AdaptiveController
-from pynlo.physics.solvers.rk4ip import RK4IPStepper
+
+try:
+    from pynlo.backends import get_cupy_context, get_numpy_context
+    from pynlo.physics.equations.manakov import ManakovEquation
+    from pynlo.physics.field import FieldState
+    from pynlo.physics.grid import Grid
+    from pynlo.physics.solvers import Propagator
+    from pynlo.physics.solvers.adaptive import AdaptiveController
+    from pynlo.physics.solvers.rk4ip import RK4IPStepper
+except ImportError:  # PyNLO 为可选依赖；缺失时回退到自带的 NumPy SSFM 求解器。
+    get_cupy_context = get_numpy_context = None
+    ManakovEquation = FieldState = Grid = Propagator = AdaptiveController = RK4IPStepper = None
+
 from scipy.constants import c
 
 from physics_nlo_eval.core.base import BaseBlock
@@ -85,10 +94,20 @@ class FiberChannel(BaseBlock):
         self.slope_a_eff_um2_per_nm = slope_a_eff_um2_per_nm
         self.ref_lambda_nm = ref_lambda_nm
         self.raman_r3 = raman_r3
-        if compute_ctx_name == "numpy":
+        # compute_ctx 允许为 None：PyNLO 不可用时退化为自带的 NumPy SSFM 求解器。
+        if compute_ctx_name == "numpy" and get_numpy_context is not None:
             self.compute_ctx = get_numpy_context()
-        elif compute_ctx_name == "cupy":
+        elif compute_ctx_name == "cupy" and get_cupy_context is not None:
             self.compute_ctx = get_cupy_context()
+        elif compute_ctx_name == "numpy":
+            self.compute_ctx = None
+        elif compute_ctx_name == "cupy":
+            warnings.warn(
+                "PyNLO/CuPy is unavailable; falling back to the NumPy split-step solver.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.compute_ctx = None
         else:
             raise ValueError("ComputeCtx name must be 'numpy' or 'cupy'.")
 
@@ -103,8 +122,9 @@ class FiberChannel(BaseBlock):
         # PMD (使用 coarse_step_size_m 作为粗步长大小)，确保 z_grid 至少有两个点
         n_z_points = max(2, int(self.length_m / self.coarse_step_size_m))
         self.z_grid = np.linspace(0, self.length_m, n_z_points)
+        # 用宿主 np.sqrt：compute_ctx 可能为 None（无 PyNLO 回退路径）。
         self.delta_tau_si = (
-            self.d_pmd_ps_per_sqrt_km * self.compute_ctx.array.sqrt(self.coarse_step_size_m / 1e3) * 1e-12
+            self.d_pmd_ps_per_sqrt_km * np.sqrt(self.coarse_step_size_m / 1e3) * 1e-12
         )  # s
 
     def _setup_pynlo_environment(self, signal: Signal) -> tuple[Any, Any, Any]:
@@ -221,6 +241,10 @@ class FiberChannel(BaseBlock):
         if opt_signal.data.ndim != 2 or opt_signal.data.shape[0] != opt_signal.ctx.n_pol:
             raise ValueError("Input optical signal data must be 2D (n_pol, N_samples).")
 
+        # 无 PyNLO 上下文时走自带的 NumPy 分步傅里叶求解器。
+        if self.compute_ctx is None:
+            return self._forward_numpy(opt_signal)
+
         # 1. 设置 PyNLO 环境
         grid, equation, initial_field_state = self._setup_pynlo_environment(opt_signal)
 
@@ -271,11 +295,110 @@ class FiberChannel(BaseBlock):
         )
         return Signal(data=final_data.astype(np.complex64), ctx=new_ctx)
 
+    def _forward_numpy(self, opt_signal: Signal) -> Signal:
+        """用自带的对称分步傅里叶 (SSFM) 求解器传播信号。
+
+        这是 PyNLO/CuPy 不可用时的回退路径，输出元数据中带
+        ``fiber_solver="numpy-ssfm"`` 以便下游识别。
+
+        Notes
+        -----
+        与 PyNLO 路径存在两处已知的模型差异，切换求解器会带来数值差异：
+
+        1. 非线性系数按中心频率取标量 γ，而 PyNLO 路径用逐频点 γ(ω)
+           （含 ``slope_a_eff_um2_per_nm`` 的有效面积色散项），因此本路径
+           不使用 ``slope_a_eff_um2_per_nm``；
+        2. PMD 采用每步独立抽取的随机幺正旋转 + DGD 相移近似，而非
+           PyNLO 的散射算子回调。
+        """
+        data = opt_signal.data.astype(np.complex128, copy=True)
+        original_n_pol = data.shape[0]
+        if original_n_pol == 1:
+            # 单偏振输入补零为双偏振，与 Manakov 求解器的维度约定一致。
+            data = np.vstack((data, np.zeros_like(data)))
+        n_samples = data.shape[-1]
+        n_steps = max(1, int(np.ceil(self.length_m / self.coarse_step_size_m)))
+        dz = self.length_m / n_steps
+        omega = 2 * np.pi * np.fft.fftfreq(n_samples, d=1 / opt_signal.ctx.sample_rate)
+        beta = self.beta2_si * omega**2 / 2 + self.beta3_si * omega**3 / 6
+        alpha = np.asarray(self.alpha_np_inv_m)
+        if alpha.ndim and alpha.size not in {1, n_samples}:
+            raise ValueError("Frequency-dependent alpha must have one value per signal sample.")
+        half_linear = np.exp((1j * beta - alpha / 2) * dz / 2)
+        center_gamma = 2 * np.pi * opt_signal.ctx.center_freq * self.n2_si / (c * self.a_eff_si)
+        if np.all(alpha == 0):
+            nonlinear_length = dz
+        else:
+            alpha_mean = float(np.mean(alpha))
+            nonlinear_length = -np.expm1(-alpha_mean * dz) / alpha_mean
+
+        if self.raman_r3 is not None:
+            raman = np.asarray(self.raman_r3)
+            if raman.shape[-1] != n_samples:
+                warnings.warn(
+                    "Raman response length does not match the grid; instantaneous Kerr response used.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                raman = None
+        else:
+            raman = None
+
+        rng = np.random.default_rng()
+        for _ in range(n_steps):
+            data = np.fft.ifft(np.fft.fft(data, axis=-1) * half_linear, axis=-1)
+            power = np.sum(np.abs(data) ** 2, axis=0)
+            if raman is not None:
+                power = np.real(np.fft.ifft(np.fft.fft(power) * np.fft.fft(raman))) / n_samples
+            data *= np.exp(1j * (8 / 9) * center_gamma * nonlinear_length * power)[None, :]
+            if self.d_pmd_ps_per_sqrt_km > 0:
+                theta = np.arcsin(np.sqrt(rng.random()))
+                phi, psi = 2 * np.pi * rng.random(2)
+                rotation = np.array(
+                    [
+                        [np.cos(theta) * np.exp(1j * phi), np.sin(theta) * np.exp(1j * psi)],
+                        [-np.sin(theta) * np.exp(-1j * psi), np.cos(theta) * np.exp(-1j * phi)],
+                    ]
+                )
+                spectrum = rotation @ np.fft.fft(data, axis=-1)
+                dgd = self.d_pmd_ps_per_sqrt_km * np.sqrt(dz / 1e3) * 1e-12
+                spectrum[0] *= np.exp(-0.5j * omega * dgd)
+                spectrum[1] *= np.exp(0.5j * omega * dgd)
+                data = np.fft.ifft(spectrum, axis=-1)
+            data = np.fft.ifft(np.fft.fft(data, axis=-1) * half_linear, axis=-1)
+
+        ctx = opt_signal.ctx.copy()
+        ctx.n_pol = 2
+        ctx.meta.update(
+            {
+                "fiber_length_m": self.length_m,
+                "fiber_alpha_db_per_km": self.alpha_db_per_km,
+                "fiber_beta2_ps2_per_km": self.beta2_ps2_per_km,
+                "fiber_beta3_ps3_per_km": self.beta3_ps3_per_km,
+                "fiber_d_pmd_ps_per_sqrt_km": self.d_pmd_ps_per_sqrt_km,
+                "fiber_a_eff_um2": self.a_eff_um2,
+                # 与 PyNLO 路径保持键一致；注意本回退路径并不使用该斜率项。
+                "fiber_slope_a_eff_um2_per_nm": self.slope_a_eff_um2_per_nm,
+                "fiber_solver": "numpy-ssfm",
+            }
+        )
+        return Signal(data.astype(np.complex64), ctx)
+
 
 class EDFA(BaseBlock):
-    """掺铒光纤放大器 (EDFA) 模块。"""
+    """掺铒光纤放大器 (EDFA) 模块。
 
-    def __init__(self, gain_db: float, nf_db: float) -> None:
+    ASE 噪声按量子极限模型 ``0.5 * NF * h * nu * (G - 1) * B`` 计算，
+    因此单位增益 (0 dB) 时 ASE 功率严格为零。
+    """
+
+    def __init__(
+        self,
+        gain_db: float,
+        nf_db: float,
+        noise_bandwidth_hz: float | None = None,
+        seed: int | None = None,
+    ) -> None:
         """
         初始化 EDFA。
 
@@ -285,12 +408,22 @@ class EDFA(BaseBlock):
             放大器的增益 (dB)。
         nf_db : float
             放大器的噪声系数 (dB)。
+        noise_bandwidth_hz : float | None, optional
+            等效光噪声带宽 (Hz)。为 None 时取信号的采样率作为复包络带宽。
+        seed : int | None, optional
+            指定后 ASE 噪声由该种子驱动的独立随机数发生器产生，结果可复现；
+            为 None 时沿用全局 ``numpy.random`` 状态（便于配合
+            ``np.random.seed`` 获得确定性结果）。
         """
         super().__init__(name=f"EDFA(Gain={gain_db}dB, NF={nf_db}dB)")
         self.gain_db = gain_db
         self.nf_db = nf_db
+        if noise_bandwidth_hz is not None and noise_bandwidth_hz <= 0:
+            raise ValueError("ASE noise bandwidth must be positive.")
+        self.noise_bandwidth_hz = noise_bandwidth_hz
         self.gain_linear = 10 ** (self.gain_db / 10)
         self.nf_linear = 10 ** (self.nf_db / 10)
+        self.rng = np.random.default_rng(seed) if seed is not None else None
 
     def forward(self, opt_signal: Signal) -> Signal:
         """
@@ -322,29 +455,26 @@ class EDFA(BaseBlock):
         # N_sp = F_n * G / (G - 1) * F_n_prime, where F_n is NF_linear (simplified N_sp ~ NF_linear)
         # For simplicity, assume B_opt is related to sample_rate
 
-        # Using a simplified formula for ASE variance directly based on NF and gain
-        # N_ase = F_n * h * nu * B_e * G (single polarization, electrical bandwidth B_e)
-        # For complex noise, we need variance for real and imag parts: var = N_ase / 2
-
+        # 单个偏振的 ASE 光功率：P_ASE = 0.5 * NF * h * nu * (G - 1) * B，
+        # 其中自发辐射因子 n_sp ~= NF/2。用 (G - 1) 而非 G 是关键：放大器不
+        # 可能放大自身自发辐射之外的量子噪声，且单位增益时必须无 ASE 输出
+        # （旧实现用 G，G=1 时会凭空注入噪声）。
         h = 6.62607015e-34  # Planck's constant (J·s)
         nu = opt_signal.ctx.center_freq  # Optical frequency (Hz)
+        noise_bandwidth = self.noise_bandwidth_hz or opt_signal.ctx.sample_rate  # Hz
 
-        # Noise bandwidth for ASE, typically related to electrical bandwidth (sample_rate)
-        # Or a specific optical filter bandwidth. Let's use sample_rate for now.
-        noise_bandwidth = opt_signal.ctx.sample_rate  # Hz (electrical bandwidth)
-
-        # For our scale (signal power in W), let's estimate noise power in W.
-        noise_variance_per_sample = (
-            0.5 * self.nf_linear * self.gain_linear * h * nu * noise_bandwidth
-        )  # Noise power in W
-        # Divide by 2 because complex noise has real and imaginary parts
-        # and we want std dev (sqrt of variance) for each component
-        noise_std_dev = np.sqrt(noise_variance_per_sample / 2)  # sqrt(W)
+        ase_power_per_pol = (
+            0.5 * self.nf_linear * h * nu * max(self.gain_linear - 1.0, 0.0) * noise_bandwidth
+        )  # W
+        # 复噪声的实部与虚部各自的标准差
+        noise_std_dev = np.sqrt(ase_power_per_pol / 2)  # sqrt(W)
 
         # Generate complex Gaussian noise
+        # 指定了 seed 就用独立 RNG（可复现）；否则沿用全局 numpy.random 状态。
+        generator = self.rng if self.rng is not None else np.random
         ase_noise = (
-            np.random.normal(0, noise_std_dev, amplified_signal_data.shape)
-            + 1j * np.random.normal(0, noise_std_dev, amplified_signal_data.shape)
+            generator.normal(0, noise_std_dev, amplified_signal_data.shape)
+            + 1j * generator.normal(0, noise_std_dev, amplified_signal_data.shape)
         ).astype(np.complex64)
 
         output_signal_data = amplified_signal_data + ase_noise
@@ -361,6 +491,8 @@ class EDFA(BaseBlock):
                 **(opt_signal.ctx.meta or {}),
                 "edfa_gain_db": self.gain_db,
                 "edfa_nf_db": self.nf_db,
+                "edfa_ase_bandwidth_hz": noise_bandwidth,
+                "edfa_ase_power_per_pol_w": ase_power_per_pol,
             },
         )
         return Signal(data=output_signal_data, ctx=new_ctx)
