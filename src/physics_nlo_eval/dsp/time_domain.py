@@ -452,7 +452,19 @@ class ChromaticDispersionComp(BaseBlock):
 
         # 2. 构建角频率网格 (rad/s)
         # freq: [-fs/2, ..., fs/2-1], omega = 2 * pi * freq
-        freq = np.fft.fftfreq(num_samples, d=1.0 / sample_rate)
+        #
+        # 频率间隔必须与施加色散的一方保持一致。PyNLO 的
+        # `Grid.create(n, v_center, bandwidth)` 把 bandwidth 解释为 n 个频点的
+        # inclusive span，即频率间隔为 bandwidth/(n-1)，对应时间步长
+        # (n-1)/(n*fs)；而 np.fft.fftfreq(n, 1/fs) 给出的间隔是 fs/n。两者相差
+        # 一个 n/(n-1) 的因子。
+        #
+        # 色散相位正比于 omega^2，沿用 fftfreq 会让补偿相位带上约 2/(n-1) 的
+        # 相对误差。n 大时无所谓（n=36000 时仅 0.58 rad），但 n 小时足以让补偿
+        # 完全失效：n=3600 时在 576 GHz 处累积 5.8 rad，接近一整圈，BER 会从
+        # 1e-4 量级恶化到 0.41。这里按 FiberChannel/PyNLO 的实际频率轴取值。
+        freq_step_scale = num_samples / (num_samples - 1) if num_samples > 1 else 1.0
+        freq = np.fft.fftfreq(num_samples, d=1.0 / sample_rate) * freq_step_scale
         omega = 2 * np.pi * freq
 
         # 3. 计算补偿相位

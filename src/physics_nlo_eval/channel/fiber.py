@@ -319,12 +319,20 @@ class FiberChannel(BaseBlock):
         n_samples = data.shape[-1]
         n_steps = max(1, int(np.ceil(self.length_m / self.coarse_step_size_m)))
         dz = self.length_m / n_steps
-        omega = 2 * np.pi * np.fft.fftfreq(n_samples, d=1 / opt_signal.ctx.sample_rate)
+        # 频率轴必须与 PyNLO 的网格约定一致（inclusive span，间隔 fs/(n-1)），
+        # 否则本回退路径产出的信号与 ChromaticDispersionComp 不匹配——那是个
+        # 正比于 ω²·L 的相位误差，n 小时足以让色散补偿完全失效。详见
+        # dsp/time_domain.py 中 ChromaticDispersionComp 的说明。
+        freq_scale = n_samples / (n_samples - 1) if n_samples > 1 else 1.0
+        omega = 2 * np.pi * np.fft.fftfreq(n_samples, d=1 / opt_signal.ctx.sample_rate) * freq_scale
         beta = self.beta2_si * omega**2 / 2 + self.beta3_si * omega**3 / 6
         alpha = np.asarray(self.alpha_np_inv_m)
         if alpha.ndim and alpha.size not in {1, n_samples}:
             raise ValueError("Frequency-dependent alpha must have one value per signal sample.")
-        half_linear = np.exp((1j * beta - alpha / 2) * dz / 2)
+        # 色散项的符号必须与 PyNLO 一致：实测 PyNLO 施加的相位为
+        # +|β2|·ω²·L/2（β2<0），而 beta = β2_si·ω²/2 本身为负，故取 -1j*beta。
+        # 写成 +1j*beta 会传播出反向色散，既与 PyNLO 不符，也无法被 CDC 补偿。
+        half_linear = np.exp((-1j * beta - alpha / 2) * dz / 2)
         center_gamma = 2 * np.pi * opt_signal.ctx.center_freq * self.n2_si / (c * self.a_eff_si)
         if np.all(alpha == 0):
             nonlinear_length = dz
