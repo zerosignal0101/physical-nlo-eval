@@ -46,20 +46,24 @@ def apply_fractional_delay(sig: np.ndarray, delay_samples: float) -> np.ndarray:
     n_pol, n = sig.shape
     out = np.zeros_like(sig, dtype=np.complex128)
 
+    # 两端各补 2 个样点（边缘保持），让首尾样点也走同一套插值。
+    # 早期版本在这两处直接 `out[p, i] = sig[p, i]`，等于**没有**施加延迟：
+    # 第 0 个样点因此比它该在的位置早 0.25 个样点，而定时恢复对首个符号的
+    # 取样时刻恰好落在它附近，三次插值把这个台阶摊到了符号 0 上。
+    # 实测符号 0 的残差 0.0767 正好是 256QAM 最小判决距离 0.1534 的一半，
+    # 于是稳定地翻 1 个比特 —— 与定时恢复算法本身无关。
+    pad = 2
     for p in range(n_pol):
+        padded = np.pad(sig[p], pad, mode="edge")
         for i in range(n):
-            fi = i - delay_samples
+            fi = i - delay_samples + pad
             base = int(np.floor(fi))
             mu = fi - base
 
-            if base - 1 < 0 or base + 2 >= n:
-                out[p, i] = sig[p, i]  # 边界保持原样
-                continue
-
-            xm1 = sig[p, base - 1]
-            x0 = sig[p, base]
-            x1 = sig[p, base + 1]
-            x2 = sig[p, base + 2]
+            xm1 = padded[base - 1]
+            x0 = padded[base]
+            x1 = padded[base + 1]
+            x2 = padded[base + 2]
 
             c0 = x0
             c1 = -(1 / 3) * xm1 - 0.5 * x0 + x1 - (1 / 6) * x2
