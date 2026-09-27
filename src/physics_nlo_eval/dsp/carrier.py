@@ -30,6 +30,9 @@ class PhaseNoiseCompensation(BaseBlock):
     constellation : np.ndarray | Constellation | None, optional
         理想星座点数组或 Constellation 对象，提供给 BPS 算法以进行精确的欧氏距离判决。
         若为 Constellation 实例，则使用其 .lut 属性。若未提供则使用简化代数约束。
+    resolve_ambiguity : bool, optional
+        仅 BPS 使用。是否沿块序列做连续性的 M 重相位解模糊，默认 False。
+        两种取值的取舍见 `_sc_bps` 的说明，差异是实打实的，没有哪一方全面更好。
     """
 
     def __init__(
@@ -39,6 +42,7 @@ class PhaseNoiseCompensation(BaseBlock):
         block_size: int = 128,
         m_power: int = 4,
         constellation: np.ndarray | Constellation | None = None,
+        resolve_ambiguity: bool = False,
     ) -> None:
         """初始化 PhaseNoiseCompensation。"""
         super().__init__(name=f"PhaseNoiseComp({method})")
@@ -49,6 +53,7 @@ class PhaseNoiseCompensation(BaseBlock):
         self.n_test_phases = n_test_phases
         self.block_size = block_size
         self.m_power = m_power
+        self.resolve_ambiguity = resolve_ambiguity
         # 支持 Constellation 对象或原始数组
         if isinstance(constellation, Constellation):
             self._constellation_lut = constellation.lut
@@ -102,10 +107,34 @@ class PhaseNoiseCompensation(BaseBlock):
         return Signal(data=compensated_data, ctx=new_ctx)
 
     def _sc_bps(self, pol_data: np.ndarray) -> np.ndarray:
-        """单载波 BPS (Blind Phase Search) 实现。"""
+        """单载波 BPS (Blind Phase Search) 实现。
+
+        搜索范围取星座的旋转对称周期 (方形 QAM 为 pi/2)，因此逐块的代价函数
+        只能把相位确定到 pi/2 的整数倍。关键在于: 代价函数**本身就是** pi/2
+        周期的，所以没有任何基于代价的判据能分辨这些等价分支 —— 分支序列只能
+        靠先验去定，而不同的先验对应不同的取舍，没有哪一方全面更好。
+
+        两种行为 (由 ``resolve_ambiguity`` 选择)，实测 (SP-QPSK, block=128):
+
+        - ``False`` (默认): 每块独立取极值，等价于"取使残余最小的那个分支"。
+          长程漂移一旦超过 +/-pi/4 就会锁到错误分支 (1 MHz 线宽连续维纳漂移
+          BER 0.32，和不补偿一样)；但它是**无记忆**的，相位短时兜一圈又回来
+          (升余弦 pi/2 脉冲) 时能自愈，实测 BER 1.1%。
+        - ``True``: 每块取与上一块最接近的等价相位，等于用第一块锚定绝对相位
+          后连续跟踪。连续维纳漂移 BER 0.00 (6 个种子全为 0)；代价是遇到真正
+          的 pi/2 周跳时会把分支一路带错 (同一个脉冲场景退化到 22.7%)。
+
+        两者都要求单块内的相位变化明显小于 pi/2，否则前者失锁、后者选错分支。
+        绝对的 M 重模糊本身是盲估计无法分辨的 (需要导频或差分编码)，本实现不做
+        处理 —— 需要周跳处理时请用 'V&V' + 导频或 'pilot_assisted'。
+        """
         compensated = np.empty_like(pol_data)
-        test_phases = np.linspace(-np.pi / 4, np.pi / 4, self.n_test_phases, endpoint=False)
+        search_halfwidth = np.pi / 4
+        test_phases = np.linspace(-search_halfwidth, search_halfwidth, self.n_test_phases, endpoint=False)
         test_phasors = np.exp(1j * test_phases)
+        # 解模糊的步长就是搜索范围宽度 (即星座的 M 重旋转对称周期)
+        ambiguity = 2 * search_halfwidth
+        previous_phase: float | None = None
 
         for i in range(0, len(pol_data), self.block_size):
             block = pol_data[i : i + self.block_size]
@@ -119,7 +148,16 @@ class PhaseNoiseCompensation(BaseBlock):
                 cost = np.sum((np.abs(rotated.real) - np.abs(rotated.imag)) ** 2, axis=1)
 
             best_idx = int(np.argmin(cost))
-            compensated[i : i + self.block_size] = rotated[best_idx]
+
+            if not self.resolve_ambiguity:
+                compensated[i : i + self.block_size] = rotated[best_idx]
+                continue
+
+            block_phase = float(test_phases[best_idx])
+            if previous_phase is not None:
+                block_phase += round((previous_phase - block_phase) / ambiguity) * ambiguity
+            previous_phase = block_phase
+            compensated[i : i + self.block_size] = block * np.exp(1j * block_phase)
 
         return compensated
 

@@ -17,8 +17,22 @@
 
 ## BPS 的优势
 
-BPS (Blind Phase Search) 不做块平均，而是对每个符号搜索最优相位，
+BPS (Blind Phase Search) 不做块平均，而是对每个符号块搜索最优相位，
 因此对快速相位变化的跟踪能力更强，不存在 V&V 的块平均问题。
+
+## BPS 的 pi/2 模糊度 (resolve_ambiguity)
+
+BPS 的块代价函数是 pi/2 周期的，所以它只能把相位确定到 pi/2 的整数倍，
+而多出来的 pi/2 对 QPSK 不是无害的整体旋转 (会把星座点映射到别的星座点)。
+分支序列无法由代价函数分辨，只能靠先验，`resolve_ambiguity` 就是在这两种
+先验之间选:
+
+- 关 (默认): 无记忆、自愈，但长程漂移超过 +/-pi/4 就锁错分支。
+- 开: 跨块连续跟踪、能跟住长程漂移，但真正的 pi/2 周跳会被一路带错。
+
+本文件里 `test_vv_continuous_drift` (长程维纳漂移) 用开，
+`test_vv_vs_bps` 的平滑 pi/2 脉冲场景用默认的关。取舍的实测数据见
+`PhaseNoiseCompensation._sc_bps` 的 docstring。
 """
 
 import numpy as np
@@ -274,8 +288,19 @@ def test_vv_continuous_drift():
     rx_bits_vv = demapper.forward(rx_signal_vv)
     ber_vv = np.sum(tx_bits != rx_bits_vv) / total_bits
 
-    # BPS 补偿
-    pnc_bps = PhaseNoiseCompensation(method="BPS", n_test_phases=64, constellation=mapper.constellation.lut)
+    # BPS 补偿。
+    # 必须显式打开 resolve_ambiguity: BPS 的逐块代价函数是 pi/2 周期的,
+    # 默认 (无记忆) 的行为会把相位只确定到 pi/2 的整数倍, 而本用例的维纳漂移
+    # 累积到约 1.6 rad, 早已越过 +/-pi/4, 于是 BPS 会锁到错误分支、BER 0.32
+    # (与不补偿相同)。这里要考察的是"能否跟踪连续漂移", 所以选用带跨块连续性
+    # 解模糊的版本 (实测 BER 0.00)。默认关掉是为了保留 test_vv_vs_bps 中
+    # "平滑 pi/2 脉冲"场景的无记忆自愈特性, 详见 _sc_bps 的 docstring。
+    pnc_bps = PhaseNoiseCompensation(
+        method="BPS",
+        n_test_phases=64,
+        constellation=mapper.constellation.lut,
+        resolve_ambiguity=True,
+    )
     rx_signal_bps = pnc_bps.forward(rx_signal)
     rx_bits_bps = demapper.forward(rx_signal_bps)
     ber_bps = np.sum(tx_bits != rx_bits_bps) / total_bits
