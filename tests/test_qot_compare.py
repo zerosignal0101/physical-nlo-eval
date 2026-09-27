@@ -7,12 +7,13 @@ QoT 评估器对比测试 - PyNLO 仿真 vs ISRS-GN 解析模型
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
+import pynlo
 
 # Add paths
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, "D:/C-Codes/Optical-Networks/network-nlo-eval/src")
 
 from physics_nlo_eval.channel.fiber import FiberChannel
 from physics_nlo_eval.channel.wdm import ChannelExtractor, ChannelSpec, WDMDemux, WDMMux, WDMPlan
@@ -26,6 +27,9 @@ from physics_nlo_eval.tx.rrc import RRCFilter
 
 PLOTS_DIR = os.path.join(os.path.dirname(__file__), "..", "results")
 os.makedirs(PLOTS_DIR, exist_ok=True)
+
+# 拉曼增益数据文件 (随 pynlo 安装包分发)
+RAMAN_FILE = str(Path(pynlo.__file__).parent / "utility" / "RamanGain.dat")
 
 # ISRS-GN imports - kept for future reference
 # from network_nlo_eval.models.isrs_gn import MultiBandISRSGN, MultiSpanOpticalPath as GNOpticalPath
@@ -350,7 +354,7 @@ def test_pynlo_qot():
     r3 = raman_from_dat(
         n_samples,
         dt,
-        filepath="D:/C-Codes/Optical-Networks/PyNLO/pynlo/utility/RamanGain.dat",
+        filepath=RAMAN_FILE,
         raman_frac=0.18,
         analytic=True,
     )[1]

@@ -8,7 +8,10 @@ WDM + 光纤 (ISRS/NLO) + IdealAmplifier 测试
 
 """
 
+from pathlib import Path
+
 import numpy as np
+import pynlo
 from pynlo.utility.chi3 import raman_from_dat
 
 from physics_nlo_eval.channel.fiber import FiberChannel, IdealAmplifier
@@ -57,6 +60,9 @@ COARSE_STEP_SIZE_M = 500.0  # 500 m 步长
 NUM_SYMBOLS = 512  # 减少符号数以加快计算
 SEED = 42
 
+# 拉曼增益数据文件 (随 pynlo 安装包分发)
+RAMAN_FILE = str(Path(pynlo.__file__).parent / "utility" / "RamanGain.dat")
+
 
 # ============================================================================
 # 辅助函数
@@ -68,7 +74,7 @@ def create_raman_response(n_points: int, dt_s: float) -> np.ndarray:
     _, nonlinear_v = raman_from_dat(
         n_points,
         dt_s,
-        filepath="/home/zsig/Documents/Codes/PyNLO/pynlo/utility/RamanGain.dat",
+        filepath=RAMAN_FILE,
         raman_frac=0.18,
         analytic=True,
     )

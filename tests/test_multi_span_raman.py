@@ -5,7 +5,10 @@
 解调使用 Demapper + EVM/BER。
 """
 
+from pathlib import Path
+
 import numpy as np
+import pynlo
 from pynlo.utility.chi3 import raman_from_dat
 
 from physics_nlo_eval.channel.fiber import FiberChannel, IdealAmplifier
@@ -35,7 +38,7 @@ COARSE_STEP_M = 500.0
 NUM_SYMBOLS = 256
 RMAN_SPS = 4000  # Raman 网格 sps: sr = 4000 × 50e9 = 200 THz, dt = 5.0 fs < 7.6 fs
 SEED = 42
-RAMAN_FILE = "/home/zsig/Documents/Codes/PyNLO/pynlo/utility/RamanGain.dat"
+RAMAN_FILE = str(Path(pynlo.__file__).parent / "utility" / "RamanGain.dat")
 
 
 def make_signal():
