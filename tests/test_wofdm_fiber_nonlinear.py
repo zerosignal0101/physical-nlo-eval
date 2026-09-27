@@ -246,9 +246,11 @@ def test_wofdm_fiber(
     print(f"\n  测量 BER: {measured_ber:.4e}")
     print(f"  理论 BER: {theoretical_ber:.4e}")
     print(f"  BER ratio: {ratio:.2f}")
-    print(f"  {'[PASS]' if ratio < 5.0 else '[WARN]'} BER ratio: {ratio:.2f}")
-
-    return measured_ber, theoretical_ber
+    assert ratio < 5.0, (
+        f"W-OFDM 光纤信道 BER 比值过高: 测量 {measured_ber:.4e} / 理论 {theoretical_ber:.4e} "
+        f"= {ratio:.2f}, 要求 < 5.0"
+    )
+    print(f"  [PASS] BER ratio: {ratio:.2f}")
 
 
 def run_all_tests():

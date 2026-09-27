@@ -288,13 +288,14 @@ def test_vv_continuous_drift():
     print(f"  BER (V&V):   {ber_vv:.2e}")
     print(f"  BER (BPS):   {ber_bps:.2e}")
 
-    if ber_bps < ber_noisy:
-        improvement = ber_noisy / max(ber_bps, 1e-10)
-        print(f"  [PASS] BPS 有效跟踪连续相位漂移，改善比: {improvement:.1f}x")
+    # 判据：BPS 要么严格改善，要么已无误码 (基线为 0 时"改善"不可测)
+    assert ber_bps < ber_noisy or ber_bps == 0, (
+        f"BPS 未跟踪连续相位漂移: 无补偿 {ber_noisy:.2e} → BPS {ber_bps:.2e}"
+    )
+    print(f"  [PASS] BPS 有效跟踪连续相位漂移, 改善比: {ber_noisy / max(ber_bps, 1e-10):.1f}x")
 
     if ber_vv < ber_noisy:
-        improvement = ber_noisy / max(ber_vv, 1e-10)
-        print("  [INFO] V&V 也有一定改善")
+        print(f"  [INFO] V&V 改善比: {ber_noisy / max(ber_vv, 1e-10):.1f}x")
 
 
 if __name__ == "__main__":

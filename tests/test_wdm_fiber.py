@@ -181,7 +181,7 @@ def test_wdm_fiber(
             all_passed = False
         print(f"  Ch{i} ({ch_spec.freq_offset_hz / 1e9} GHz): BER={best_ber:.2e} {status}")
 
-    return all_passed
+    assert all_passed, "test_wdm_fiber: 存在通道 BER 超过阈值 (NLO 开启时 0.3，否则 1e-3)"
 
 
 def run_all_tests():

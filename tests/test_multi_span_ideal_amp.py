@@ -146,27 +146,21 @@ def test_object_reuse():
         power_error = abs(10 * np.log10(r["p_after_amp"] * 1e3) -
                           10 * np.log10(p_launch_total * 1e3))
         print(f"\n  Span {i+1} power recovery error: {power_error:.3f} dB")
-        if power_error > 0.5:
-            print(f"  [WARN] Span {i+1}: power recovery error > 0.5 dB!")
-            return False
+        assert power_error <= 0.5, f"Span {i+1} 功率恢复误差 {power_error:.3f} dB 超过 0.5 dB"
 
     # 2. EVM 应逐段恶化
     for i in range(1, len(span_results)):
-        if span_results[i]["evm"] <= span_results[i-1]["evm"]:
-            print(f"  [WARN] Span {i+1} EVM did not degrade!")
-            return False
+        prev_evm, cur_evm = span_results[i - 1]["evm"], span_results[i]["evm"]
+        assert cur_evm > prev_evm, f"Span {i+1} 的 EVM ({cur_evm:.4f}) 未较 Span {i} ({prev_evm:.4f}) 恶化"
 
     # 3. 功率不应漂移
     p_first_amp_out = span_results[0]["p_after_amp"]
     p_last_amp_out = span_results[-1]["p_after_amp"]
     drift = abs(10 * np.log10(p_last_amp_out / p_first_amp_out))
     print(f"\n  Power drift over 5 spans: {drift:.3f} dB")
-    if drift > 1.0:
-        print(f"  [WARN] Excessive power drift!")
-        return False
+    assert drift <= 1.0, f"跨 5 段的功率漂移 {drift:.3f} dB 超过 1.0 dB"
 
     print(f"  [PASS] Object reuse OK")
-    return True
 
 
 # ============================================================================
@@ -318,13 +312,10 @@ def test_theory_vs_measured_snr():
     final_delta = final_snr_evm - final_theory
     print(f"\n  Final Δ = {final_delta:+.2f} dB")
 
-    # 容许 1.5 dB 偏差 (含 MF 响应非理想性)
-    if abs(final_delta) > 2.0:
-        print(f"  [FAIL] SNR deviation too large!")
-        return False
+    # 容许 2.0 dB 偏差 (含 MF 响应非理想性)
+    assert abs(final_delta) <= 2.0, f"理论-实测 SNR 偏差过大: Δ = {final_delta:+.2f} dB, 容差 ±2.0 dB"
 
     print(f"  [PASS] Theory-measurement SNR within tolerance")
-    return True
 
 
 # ============================================================================
@@ -390,17 +381,19 @@ def test_amplifier_gain_accuracy():
     print(f"  Avg gain (spans 8-10): {avg_last3:.3f} dB")
     print(f"  Gain drift: {gain_drift:+.3f} dB")
 
-    if abs(gain_drift) > 0.5:
-        print(f"  [WARN] Significant gain drift detected!"
-              f"  Noise power accumulation affects gain calculation.")
-        print(f"  Root cause: IdealAmplifier uses total power (signal+noise)"
-              f" for gain computation.")
-        # This is a known design characteristic, not a crash-level bug
-        # But it should be documented
-    else:
-        print(f"  [PASS] Gain stable across spans")
+    # 首段尚无累积噪声，增益应精确匹配期望值 —— 这是本测试标题所指的 gain accuracy
+    assert abs(gains_measured[0] - expected_gain_db) < 0.5, (
+        f"首段增益不准: 实测 {gains_measured[0]:.3f} dB vs 期望 {expected_gain_db:.1f} dB"
+    )
+    print(f"  [PASS] 首段增益准确 (Δ = {gains_measured[0] - expected_gain_db:+.3f} dB)")
 
-    return True
+    # 增益漂移是已知特性 (IdealAmplifier 按总功率 signal+noise 计算增益)，
+    # 故只设宽松的健全性上限，用于捕捉真正的实现缺陷，而不是把已知行为判为失败。
+    assert abs(gain_drift) < 5.0, f"增益漂移异常: {gain_drift:+.3f} dB (已知特性应远小于此)"
+    if abs(gain_drift) > 0.5:
+        print(f"  [INFO] 增益漂移 {gain_drift:+.3f} dB — 已知特性 (噪声功率累积影响增益计算)")
+    else:
+        print("  [PASS] 跨 span 增益稳定")
 
 
 # ============================================================================
@@ -459,16 +452,13 @@ def test_metadata_integrity():
     if "tx_launch_power_dbm_per_pol" not in ctx.meta:
         issues.append("tx_launch_power_dbm_per_pol lost from meta")
 
-    if issues:
-        print(f"  [FAIL] Metadata issues found:")
-        for iss in issues:
-            print(f"    - {iss}")
-        return False
+    for iss in issues:
+        print(f"    - {iss}")
+    assert not issues, "元数据在放大/传播过程中丢失或被修改: " + "; ".join(issues)
 
     print(f"  [PASS] All metadata preserved:")
     print(f"    launch_power: {ctx.meta.get('tx_launch_power_dbm_per_pol')} dBm")
     print(f"    ideal_amp_nf: {ctx.meta.get('ideal_amp_nf_db')} dB")
-    return True
 
 
 # ============================================================================

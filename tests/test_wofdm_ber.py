@@ -329,7 +329,10 @@ def test_wofdm_awgn_ber(
     print(f"  理论 BER: {theoretical_ber:.2e}")
     print(f"  比值: {ratio:.2f}")
     print(f"  总比特: {total_bits}, 总错误: {total_errors}")
-    print(f"  {'[PASS]' if passed else '[WARN]'} BER {'OK' if passed else 'out of range'}")
+    assert passed, (
+        f"W-OFDM AWGN BER 超出理论范围: 测量 {measured_ber:.2e} vs 理论 {theoretical_ber:.2e}, 比值 {ratio:.2f}"
+    )
+    print("  [PASS] BER OK")
 
 
 # ============================================================================

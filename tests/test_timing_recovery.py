@@ -449,13 +449,11 @@ def test_phase_estimation_accuracy():
     print(f"  比例线性度: |ratio| = {abs(mean_ratio):.4f} (应接近 1.0)")
     print(f"  平均 |ratio-1|: {mean_abs_error:.4f} {'✓' if error_is_small else '✗'}")
 
-    if sign_is_positive and ratio_is_linear and error_is_small:
-        print("  [PASS] 相位估计精度测试通过")
-    else:
-        print(f"  [FAIL] sign_ok={sign_is_positive}, linear={ratio_is_linear}, err_small={error_is_small}")
-        return False
-
-    return True
+    assert sign_is_positive and ratio_is_linear and error_is_small, (
+        f"相位估计精度不足: sign_ok={sign_is_positive}, linear={ratio_is_linear}, "
+        f"err_small={error_is_small} (mean_ratio={mean_ratio:.4f}, mean_abs_error={mean_abs_error:.4f})"
+    )
+    print("  [PASS] 相位估计精度测试通过")
 
 
 # ============================================================================

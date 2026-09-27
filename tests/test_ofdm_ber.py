@@ -239,7 +239,10 @@ def test_ofdm_awgn_ber(
     print(f"  理论 BER: {theoretical_ber:.2e}")
     print(f"  比值: {ratio:.2f}")
     print(f"  总比特: {total_bits}, 总错误: {total_errors}")
-    print(f"  {'[PASS]' if passed else '[WARN]'} BER {'OK' if passed else 'out of range'}")
+    assert passed, (
+        f"OFDM AWGN BER 超出理论范围: 测量 {measured_ber:.2e} vs 理论 {theoretical_ber:.2e}, 比值 {ratio:.2f}"
+    )
+    print("  [PASS] BER OK")
 
 
 # ============================================================================
@@ -350,8 +353,11 @@ def test_fofine_cfo_compensation(
     print(f"  BER (CommonPhaseNoiseCompensate pilot_assist): {ber_fofine_pa:.2e}")
 
     # pilot_assisted 应该比无 CommonPhaseNoiseCompensate 好
-    improved = ber_fofine_pa < ber_no_fofine
-    print(f"  {'[PASS]' if improved else '[WARN]'} CommonPhaseNoiseCompensate {'有效' if improved else '未见改善'}")
+    # 判据：补偿后要么严格改善，要么已无误码 (基线为 0 时"改善"不可测)
+    assert ber_fofine_pa < ber_no_fofine or ber_fofine_pa == 0, (
+        f"CommonPhaseNoiseCompensate 使 BER 变差: 无补偿 {ber_no_fofine:.2e} → 补偿后 {ber_fofine_pa:.2e}"
+    )
+    print("  [PASS] CommonPhaseNoiseCompensate 有效或已达无误码")
 
 
 # ============================================================================

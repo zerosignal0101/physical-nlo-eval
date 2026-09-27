@@ -166,7 +166,7 @@ def test_wdm_mux_demux_basic():
         if best_ber > 1e-4:
             all_passed = False
 
-    return all_passed
+    assert all_passed, "test_wdm_mux_demux_basic: 存在通道 BER 超过阈值 1e-4，见上方各通道输出"
 
 
 def test_wdm_with_phase_noise_bps():
@@ -249,7 +249,7 @@ def test_wdm_with_phase_noise_bps():
         if best_ber > 1e-3:
             all_passed = False
 
-    return all_passed
+    assert all_passed, "test_wdm_with_phase_noise_bps: 存在通道 BER 超过阈值 1e-3，见上方各通道输出"
 
 
 def test_wdm_with_timing_offset():
@@ -327,7 +327,7 @@ def test_wdm_with_timing_offset():
         if best_ber > 1e-3:
             all_passed = False
 
-    return all_passed
+    assert all_passed, "test_wdm_with_timing_offset: 存在通道 BER 超过阈值 1e-3，见上方各通道输出"
 
 
 def test_wdm_with_pilot_assisted_vv():
@@ -425,7 +425,7 @@ def test_wdm_with_pilot_assisted_vv():
         if best_ber > 1e-3:
             all_passed = False
 
-    return all_passed
+    assert all_passed, "test_wdm_with_pilot_assisted_vv: 存在通道 BER 超过阈值 1e-3，见上方各通道输出"
 
 
 def test_wdm_high_order_qam():
@@ -498,7 +498,7 @@ def test_wdm_high_order_qam():
         if best_ber > 1e-3:
             all_passed = False
 
-    return all_passed
+    assert all_passed, "test_wdm_high_order_qam: 存在通道 BER 超过阈值 1e-3，见上方各通道输出"
 
 
 def run_all_tests():

@@ -219,10 +219,8 @@ def test_phase_noise_only():
     print(f"  BER (无补偿): {ber_noisy:.2e}")
     print(f"  BER (BPS):    {ber_bps:.2e}")
 
-    if ber_bps < ber_noisy:
-        print(f"  [PASS] BPS 有效改善 BER, 改善比: {ber_noisy / ber_bps:.1f}x")
-    else:
-        print("  [INFO] BPS 未见明显改善")
+    assert ber_bps < ber_noisy, f"BPS 未改善 BER: 无补偿 {ber_noisy:.2e} vs BPS {ber_bps:.2e}"
+    print(f"  [PASS] BPS 有效改善 BER, 改善比: {ber_noisy / ber_bps:.1f}x")
 
 
 def test_phase_noise_with_awgn():
@@ -253,13 +251,13 @@ def test_phase_noise_with_awgn():
                 f"{ber_noisy:<12.2e} {ber_comp:<12.2e} {theo_ber:<12.2e} {improvement:<8.1f}"
             )
 
-            if improvement > 1.5:
-                print(f"  [PASS] {mod} 相位噪声补偿有效")
-            else:
-                print(f"  [INFO] {mod} 改善不明显")
+            assert improvement > 1.5, f"{mod} 相位噪声补偿改善不足: {improvement:.2f}x (要求 > 1.5x)"
+            print(f"  [PASS] {mod} 相位噪声补偿有效")
 
+        except AssertionError:
+            raise
         except Exception as e:
-            print(f"{mod:<12} {eb_n0:<7.1f} {linewidth / 1e6:<10.1f} [ERROR]: {e}")
+            raise AssertionError(f"{mod} @{eb_n0}dB 相位噪声补偿计算失败: {e}") from e
 
     print("-" * 75)
 
@@ -324,10 +322,12 @@ def test_pilot_assisted():
     print(f"  BER (BPS):        {ber_bps:.4f}")
     print(f"  BER (pilot_assist): {ber_pilot:.4f}")
 
-    if ber_pilot < ber_noisy * 0.1:
-        print("  [PASS] pilot_assisted 有效恢复相位噪声")
+    assert ber_pilot < ber_noisy * 0.1, (
+        f"pilot_assisted 未有效恢复相位噪声: 无补偿 {ber_noisy:.4f} → {ber_pilot:.4f}, 要求降至 1/10 以下"
+    )
+    print("  [PASS] pilot_assisted 有效恢复相位噪声")
     if ber_bps < ber_noisy:
-        print("  [INFO] BPS 也有一定改善")
+        print(f"  [INFO] BPS 改善比: {ber_noisy / ber_bps:.1f}x")
 
 
 def test_pilot_assisted_with_awgn():
@@ -396,12 +396,13 @@ def test_pilot_assisted_with_awgn():
     print(f"  BER (pilot_assist):{ber_pilot:.4f}")
     print(f"  理论 BER (AWGN):   {theoretical_ber:.4e}")
 
-    if ber_pilot < ber_noisy:
-        if ber_pilot > 0:
-            improvement = ber_noisy / ber_pilot
-            print(f"  [PASS] pilot_assisted 改善比: {improvement:.1f}x")
-        else:
-            print("  [PASS] pilot_assisted 完全恢复相位噪声 (BER=0)")
+    assert ber_pilot < ber_noisy, (
+        f"pilot_assisted 未改善 BER: 无补偿 {ber_noisy:.4f} vs pilot_assisted {ber_pilot:.4f}"
+    )
+    if ber_pilot > 0:
+        print(f"  [PASS] pilot_assisted 改善比: {ber_noisy / ber_pilot:.1f}x")
+    else:
+        print("  [PASS] pilot_assisted 完全恢复相位噪声 (BER=0)")
 
 
 def test_bulk_phase_rotation():
@@ -454,10 +455,14 @@ def test_bulk_phase_rotation():
     print(f"  BER (V&V 无 pilot):    {ber_vv:.2e}")
     print(f"  BER (BPS):    {ber_bps:.2e}")
 
-    if ber_vv == 0:
-        print("  [PASS] V&V 正确恢复固定相位偏移 (BER=0)")
-    if ber_bps == 0:
-        print("  [PASS] BPS 正确恢复固定相位偏移 (BER=0)")
+    assert ber_bps == 0, f"BPS 未完美恢复固定相位偏移: BER = {ber_bps:.2e}, 期望 0"
+    print("  [PASS] BPS 正确恢复固定相位偏移 (BER=0)")
+
+    # 已知限制：V&V 的 4 次方运算对 QPSK 存在 pi/4 象限模糊，无导频消歧时会锁到
+    # 错误象限 (BER 约 0.5)。这是算法固有特性而非实现 bug，故不作断言。
+    # 另外本场景无补偿 BER 已为 0 (QPSK 对 22.5 度偏移仍能正确判决)，
+    # 因此"补偿带来改善"在此不可测。
+    print(f"  [INFO] V&V (无导频消歧) BER = {ber_vv:.2e} — 已知 pi/4 象限模糊，不断言")
 
 
 def test_vv_method():
@@ -520,8 +525,10 @@ def test_vv_method():
     print(f"  BER (V&V):    {ber_vv:.2e} (注意：V&V 对 QPSK 有 π/4 固有偏移)")
     print(f"  BER (BPS):    {ber_bps:.2e}")
 
-    if ber_bps < ber_noisy:
-        print(f"  [BPS 有效] 改善比: {ber_noisy / ber_bps:.1f}x")
+    # 本场景 linewidth=10kHz 过小，无补偿 BER 已为 0，"改善"不可测；
+    # 改为断言 BPS 能达到无误码。V&V 的 pi/4 象限模糊见上方 docstring。
+    assert ber_bps == 0, f"BPS 未达到无误码: BER = {ber_bps:.2e}"
+    print(f"  [PASS] BPS 达到无误码 (无补偿基线 BER = {ber_noisy:.2e}, 改善比不可测)")
 
 
 def run_all_tests():

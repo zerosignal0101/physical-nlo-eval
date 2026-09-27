@@ -101,9 +101,13 @@ def measure_channel_power_fft(signal: Signal, wdm_plan: WDMPlan, channel_idx: in
     spec = np.fft.fftshift(np.fft.fft(combined))
     freq = np.fft.fftshift(np.fft.fftfreq(n_points, d=dt))
 
-    # 找到通道中心频率
+    # 找到通道中心频率。
+    # 注意: fft 给出的是以载波为参考的基带轴 (约 ±sample_rate/2)，而
+    # reference_freq_hz 是绝对光频 (~193 THz)。若把两者相减，argmin 会永远返回
+    # Nyquist 边缘的同一个 bin，导致所有通道测到同一个窗口、功率完全相同。
+    # 通道在基带轴上的位置就是相对 reference_freq_hz 的频偏。
     ch = wdm_plan.channels[channel_idx]
-    center_freq = wdm_plan.reference_freq_hz + ch.freq_offset_hz
+    center_freq = ch.freq_offset_hz
     idx = np.argmin(np.abs(freq - center_freq))
 
     # 在通道中心附近求和功率
@@ -233,7 +237,10 @@ def test_raman_tilt():
     status = "[PASS]" if raman_tilt_valid else "[FAIL]"
     print(f"\n  Raman tilt test: {status} (net tilt = {tilt_raman - tilt_no_raman:+.2f} dB, threshold = {tilt_threshold} dB)")
 
-    return raman_tilt_valid
+    assert raman_tilt_valid, (
+        f"Raman(ISRS) 倾斜不显著: net tilt = {tilt_raman - tilt_no_raman:+.2f} dB, "
+        f"要求 |tilt| > {tilt_threshold} dB"
+    )
 
 
 def test_ideal_amp_ase():
@@ -322,7 +329,12 @@ def test_ideal_amp_ase():
     print(f"    Power recovery: {status_power} (error = {power_error_db:+.2f} dB, tol = ±{power_tolerance_db} dB)")
     print(f"    ASE noise added: {status_ase} (variance increased by {10*np.log10(amplified_variance/signal_variance):+.2f} dB)")
 
-    return power_recovery_passed and noise_added
+    assert power_recovery_passed, (
+        f"放大器功率恢复失败: error = {power_error_db:+.2f} dB, 容差 ±{power_tolerance_db} dB"
+    )
+    assert noise_added, (
+        f"未检测到 ASE 噪声: 方差比 = {amplified_variance / signal_variance:.4f}, 要求 > 1.01"
+    )
 
 
 def verify_ase_snr_consistency():

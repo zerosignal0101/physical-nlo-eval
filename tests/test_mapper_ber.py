@@ -302,10 +302,8 @@ def test_awgn_ber_validation():
             all_passed = False
 
     print("-" * 70)
-    if all_passed:
-        print("[PASS] 所有 AWGN BER 测试通过")
-    else:
-        print("[WARN] 部分 AWGN BER 测试未通过理论范围 (可能需要更多采样)")
+    assert all_passed, "部分调制格式的 AWGN BER 超出理论范围 (见上方 [WARN] 行)"
+    print("[PASS] 所有 AWGN BER 测试通过")
 
 
 # ============================================================================

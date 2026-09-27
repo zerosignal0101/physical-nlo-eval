@@ -29,6 +29,7 @@ def test_evm_basic():
 
     evm = ber_calc._calculate_evm_arrays(rx_1pol, constellation, indices)
     print(f"EVM (perfect): {evm:.6f}% (expected ~0%)")
+    assert evm < 1e-9, f"完美接收时 EVM 应为 0, 实际 {evm:.6e}%"
 
     # Test 2: Small noise added
     print("\n--- Test 2: Small noise ---")
@@ -48,6 +49,9 @@ def test_evm_basic():
 
     evm_large = ber_calc._calculate_evm_arrays(rx_large_1pol, constellation, indices)
     print(f"EVM (large noise): {evm_large:.6f}%")
+    assert evm < evm_noisy < evm_large, (
+        f"EVM 应随噪声单调增大: 无噪声 {evm:.4f}% < 小噪声 {evm_noisy:.4f}% < 大噪声 {evm_large:.4f}%"
+    )
 
     # Test 4: Dual polarization (DP-QPSK)
     print("\n--- Test 4: Dual polarization ---")
@@ -70,6 +74,7 @@ def test_evm_basic():
 
     evm_dp = ber_calc._calculate_evm_arrays(rx_dp, constellation, indices_dp)
     print(f"EVM (DP perfect): {evm_dp:.6f}% (expected ~0%)")
+    assert evm_dp < 1e-9, f"DP 完美接收时 EVM 应为 0, 实际 {evm_dp:.6e}%"
 
     # Test 5: DP with noise
     print("\n--- Test 5: DP with noise ---")
@@ -79,6 +84,9 @@ def test_evm_basic():
 
     evm_dp_noisy = ber_calc._calculate_evm_arrays(rx_dp_noisy, constellation, indices_dp)
     print(f"EVM (DP noisy): {evm_dp_noisy:.6f}%")
+    assert evm_dp_noisy > evm_dp, (
+        f"DP 加噪后 EVM 应增大: 无噪声 {evm_dp:.4f}% vs 加噪 {evm_dp_noisy:.4f}%"
+    )
 
     print("\n" + "=" * 60)
     print("All basic EVM tests completed!")
