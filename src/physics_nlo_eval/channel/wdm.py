@@ -22,10 +22,16 @@ class ChannelSpec:
     freq_offset_hz : float
         相对于 WDM 参考中心频率的频偏. 正数表示高频端，负数表示低频端。
         这允许非对称、非均匀的灵活栅格配置。
+    power_dbm_per_pol : float | None, optional
+        该通道的入纤功率 (每个偏振, dBm)。若为 None，则保留输入 Signal
+        的功率，不做逐通道缩放 (向后兼容)。设置后，:class:`WDMMux`
+        会在合波前把该通道缩放到目标功率，可用于保护信道、功率倾斜或
+        部分占用场景，而无需在外部替换 ``IQModulator``。
     """
 
     channel_id: int
     freq_offset_hz: float
+    power_dbm_per_pol: float | None = None
 
 
 @dataclass
@@ -96,6 +102,26 @@ class WDMMux(BaseBlock):
 
         return resample_poly(data, up_simplified, down_simplified, axis=-1)
 
+    @staticmethod
+    def _scale_channel_power(signal: Signal, power_dbm_per_pol: float) -> Signal:
+        """把单通道信号缩放到指定的每偏振功率。
+
+        输入信号可以是任意线性功率；缩放只改变幅度，不改变波形、采样率
+        或上下文。若输入功率为零则拒绝，避免静默产生全零通道。
+        """
+        if not np.isfinite(power_dbm_per_pol):
+            raise ValueError(f"power_dbm_per_pol must be finite, got {power_dbm_per_pol!r}.")
+        if signal.data.ndim != 2:
+            raise ValueError("Channel signal data must be 2D (n_pol, N_samples).")
+
+        target_power_w = 10 ** (power_dbm_per_pol / 10) * 1e-3
+        current_power_w = np.mean(np.abs(signal.data) ** 2, axis=1, keepdims=True)
+        if np.any(current_power_w <= 0):
+            raise ValueError("Cannot apply a channel power to a zero-power signal.")
+
+        scaled = signal.data * np.sqrt(target_power_w / current_power_w)
+        return Signal(data=scaled.astype(np.complex128), ctx=signal.ctx.copy())
+
     def combine(self, signals: list[Signal]) -> Signal:
         """合并多个通道信号。
 
@@ -139,6 +165,10 @@ class WDMMux(BaseBlock):
             if sig.ctx.n_pol != n_pol:
                 raise ValueError(f"Channel {i} has inconsistent n_pol.")
 
+            # 逐通道功率：在合波前按 WDMPlan 缩放；None 表示保留输入功率。
+            if ch_spec.power_dbm_per_pol is not None:
+                sig = self._scale_channel_power(sig, ch_spec.power_dbm_per_pol)
+
             # 重采样到全带宽
             resampled_data = self._resample_to_target(sig.data, sig.ctx.sample_rate, target_sr)
             if resampled_data.ndim == 1:
@@ -163,6 +193,7 @@ class WDMMux(BaseBlock):
                 {
                     "channel_id": ch_spec.channel_id,
                     "freq_offset_hz": ch_spec.freq_offset_hz,
+                    "power_dbm_per_pol": ch_spec.power_dbm_per_pol,
                     "original_sample_rate_hz": sig.ctx.sample_rate,
                     "original_ctx": sig.ctx.copy(),
                     "original_num_samples": sig.num_samples,
