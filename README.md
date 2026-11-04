@@ -25,6 +25,7 @@ Optical Network Physical Layer Simulation — a modular, end-to-end coherent opt
 - **IdealAmplifier** — Amplifier that restores per-channel launch power. Supports three signal formats: single-channel, stacked WDM, and broadband WDM (frequency-domain per-channel gain with smooth transition masks). ASE noise follows P_ASE = nf · h · ν · B · (G − 1).
 - **ROADM** — Wavelength-selective super-Gaussian passband, add/drop selection, insertion loss, and per-channel express attenuation.
 - **RamanPump / PumpSpec** — Forward/backward distributed-pump link-budget model with wavelength-dependent silica Raman gain and spontaneous-noise contribution.
+- **DistributedRamanFiber** — Waveform-level DRA reference: frequency-dependent Raman gain applied per NumPy SSFM step with undepleted forward/backward pumps, optional Raman ASE, and a small reproducible 3/5-channel dataset. See `docs/dra-waveform.md`.
 
 ### Receiver Front-end
 - **CoherentReceiver** — Coherent optical detection with local oscillator (LO) modeling: frequency offset, Wiener-process phase noise, and configurable LO power.

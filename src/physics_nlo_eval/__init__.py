@@ -2,6 +2,7 @@
 
 from physics_nlo_eval.channel import (
     ROADM,
+    DistributedRamanFiber,
     FiberSpan,
     NLIChannel,
     PumpSpec,
@@ -12,6 +13,7 @@ from physics_nlo_eval.channel import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "DistributedRamanFiber",
     "FiberSpan",
     "NLIChannel",
     "PumpSpec",
