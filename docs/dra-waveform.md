@@ -139,9 +139,11 @@ Gaussian 近似完全一致，因此两者的频率形状可以直接对照。�
 
 - 泵浦-信号功率方程用 **RK4** 在固定网格上积分，默认 `depleted_step_m=25 m`
   （与 SSFM 的 `coarse_step_size_m=500 m` 无关）。
-- 收敛性（1ch、前向 0.2 W、100 km）：泵浦 ODE 步长 100 m → 5 m 时输出功率
-  变化 < 1e-6 dB；SSFM 步长 500 m → 60 m 时 `SNR_NLI` 从 23.790 dB 变到
-  23.703 dB（0.09 dB）。参考数据集固定使用 500 m / 25 m，数值误差 < 0.1 dB。
+- 收敛性（**仅对 1ch、前向 0.2 W、100 km 成立**）：泵浦 ODE 步长 100 m → 5 m
+  时输出功率变化 < 1e-6 dB；SSFM 步长 500 m → 60 m 时 `SNR_NLI` 从 23.790 dB
+  变到 23.703 dB（0.09 dB）。历史参考数据集固定使用 500 m / 25 m。该 500 m
+  步长**只对 1ch/3ch 足够**；5ch/7ch 在 500 m 明显未收敛（5ch 高估 NLI
+  1.53 dB、7ch 高估 4.01 dB），不能用“数值误差 < 0.1 dB”概括，详见 §11。
 - 后向泵的不动点迭代步数写入元数据 `dra_depletion_iterations`，收敛标志
   写入 `dra_depletion_converged`。参考数据的后向泵均在 ≤ 5 次迭代内收敛。
 - 信号功率剖面用的是**中心频率的耦合系数**，不随瞬时信号频谱变化；这使
@@ -216,16 +218,22 @@ print(output.ctx.meta["dra_pump_energy_balance"])
 文件：
 
 ```text
-examples/dra_reference/dra_reference.npz           # 未耗尽（默认）
+examples/dra_reference/dra_reference.npz           # 未耗尽（历史 500 m）
 examples/dra_reference/dra_reference.json
-examples/dra_reference/dra_reference_depleted.npz  # 泵浦耗尽
+examples/dra_reference/dra_reference_depleted.npz  # 泵浦耗尽（历史 500 m）
 examples/dra_reference/dra_reference_depleted.json
+
+examples/dra_reference_converged/dra_reference.npz           # 未耗尽，62.5 m
+examples/dra_reference_converged/dra_reference.json
+examples/dra_reference_converged/dra_reference_depleted.npz  # 泵浦耗尽，62.5 m
+examples/dra_reference_converged/dra_reference_depleted.json
+examples/dra_reference_converged/step_convergence.json       # 步长探针结果
 ```
 
 生成脚本：
 
 ```bash
-# 只生成默认（未耗尽）数据集；输出与历史版本逐位一致
+# 只生成默认（未耗尽）数据集；500 m 输出与历史版本逐位一致
 python examples/generate_dra_reference.py
 
 # 追加耗尽数据集（3/5ch、1ch、发射功率扫描）
@@ -234,8 +242,16 @@ python examples/generate_dra_reference.py --depleted
 # 只重新生成耗尽数据集
 python examples/generate_dra_reference.py --depleted --skip-base
 
-# 可选：--symbols 256 --seed 20261104 --output-dir ...
+# 生成 62.5 m 收敛数据集到独立目录（不覆盖历史数据）
+python examples/generate_dra_reference.py \
+    --output-dir examples/dra_reference_converged --coarse-step-m 62.5 --depleted
+
+# 可选：--symbols 256 --seed 20261104
 ```
+
+`--coarse-step-m` 默认 500 m，保持历史行为；传入非 500 m 时元数据会额外写入
+`coarse_step_m`、`pump_model`、`step_criterion`，以及每个数据集的
+`step_converged` / `step_artifact_500m_db`。
 
 ### 6.1 参数
 
@@ -249,6 +265,7 @@ python examples/generate_dra_reference.py --depleted --skip-base
 | 泵浦 | 1450 nm，0.10/0.20 W，前向/后向，0.25 dB/km |
 | 跨数 | 1 |
 | 符号数 | 256 / 信道 |
+| SSFM 粗步长 | 历史数据 500 m；收敛数据 62.5 m（7ch 到 31.25 m 仍有 <0.003 dB 余量） |
 
 配置键：
 
@@ -318,6 +335,10 @@ nopump, fwd_0p10w, fwd_0p20w, bwd_0p10w, bwd_0p20w
 说明口径与扫描用途。数组命名与默认数据集一致（`nl_/lin_/input_/bits_/offsets_`），
 因此现有的 `band_nli_metrics` 流程可以直接复用。
 
+> 上述历史耗尽数据同样使用 500 m 步长，5ch 结果受步长伪影影响；收敛版本见
+> `examples/dra_reference_converged/dra_reference_depleted.*`（62.5 m），
+> 并在 3/5ch 之外加入 7ch（历史 500 m 的 7ch 未收敛，因此不进入默认数据）。
+
 分析脚本（不依赖解析仓）：
 
 ```bash
@@ -344,7 +365,7 @@ python examples/analyze_dra_depleted.py --json /tmp/dra_analysis.json
    `nopump`、`bwd_0p20w` 中心信道 `snr_nli_db` 与 `snr_evm_db` 均 > 20 dB；
    前向 0.2 W 因入纤即被放大，NLI 明显更差，体现前后向泵的物理差异。
 7. **7 信道压力测试**：`7ch` 用于观察有限信道数与 NLI 提取的收敛性；
-   它尚未被纳入解析模型校准域。
+   历史 500 m 数据未收敛，只作趋势参考，收敛数据见 §11。
 8. **未耗尽路径逐位兼容**：用固定种子重算 `3ch/fwd_0p20w`，与已提交的
    `dra_reference.npz` 做 `np.array_equal`，锁住 `"undepleted"` 数值路径。
 9. **耗尽模型能量/光子账**：`launch − residual = passive_loss + transferred`，
@@ -354,6 +375,11 @@ python examples/analyze_dra_depleted.py --json /tmp/dra_analysis.json
     后向泵在 1e-7 W 信号下与未耗尽结果相差 < 1e-3 dB。
 11. **耗尽参考数据集 schema**：3/5/1ch 与三档功率扫描齐全，1ch 前向增强
     与后向近零增强、扫描 NLI 单调递增。
+12. **收敛参考数据集 schema**：62.5 m 的未耗尽/耗尽数据齐全，每个数据集
+    记录 `coarse_step_m`、`step_converged`、`step_artifact_500m_db` 与走离判据；
+    5ch/7ch 无泵中心 SNR 分别约 36.33/36.27 dB，3ch 与 500 m 差 < 0.1 dB。
+13. **步长收敛检查脚本**：`examples/check_dra_step_convergence.py` 的核心函数
+    在 3ch 上验证最后两档步长增量 < 0.01 dB，并给出 500 m 伪影。
 
 ## 8. 作为解析 DRA 模型的参考
 
@@ -393,6 +419,11 @@ python examples/analyze_dra_depleted.py --json /tmp/dra_analysis.json
 残差定义：解析 − 波形，正数表示解析更乐观。对齐泵浦口径后，前向残差从
 0.54–3.85 dB 收敛到 0.20–1.69 dB；后向与无泵场景不变（本来就与泵浦耗尽
 无关）。
+
+> **步长警告**：上表基于历史 500 m 数据。3ch 在 500 m 已收敛，5ch 未收敛
+> （无泵高估 NLI 1.53 dB，前向/后向同样受影响）。表中 5ch 行不能作为最终
+> 残差；62.5 m 收敛后的对照见 §11.4。7ch 行未列入本表，收敛后的无泵
+> hybrid−wave 为 −0.95 dB。
 
 ## 9. 已知限制
 
@@ -442,7 +473,7 @@ python examples/analyze_dra_depleted.py --json /tmp/dra_analysis.json
 
 | 候选 | 证据 | 结论 |
 | --- | --- | --- |
-| SSFM 数值 | 步长 500→60 m 只让 1ch 前向 SNR 变 0.09 dB；泵浦 ODE 100→5 m 变化 < 1e-6 dB | 否 |
+| SSFM 数值 | 步长 500→60 m 只让 **1ch** 前向 SNR 变 0.09 dB；泵浦 ODE 100→5 m 变化 < 1e-6 dB（该结论不适用于 5/7ch，见 §11） | 否 |
 | 参考口径（泵浦耗尽） | 前向残差 0.54–3.85 dB → 0.20–1.69 dB | 已闭合大部分 |
 | GN 适用域 | 1ch（无 XPM）仍有 1.31 dB 超额，且该超额不随信道数增长；P³ 在耗尽 + 前向泵下失效 | 剩余偏差的主因 |
 
@@ -452,4 +483,150 @@ python examples/analyze_dra_depleted.py --json /tmp/dra_analysis.json
 
 > 负结果保留：把泵浦口径对齐后仍有非零残差；本工作不去拟合这部分，只把它
 > 记录为 GN 的适用域边界。5ch 无泵的 +0.91 dB 与 7ch 无泵的 ~3 dB 缺口属于
-> 另一条线索（GN 的 XPM/波形口径），不在本轮范围内。
+> 另一条线索（GN 的 XPM/波形口径），不在本轮范围内。后续 WP5a 已确认这两处
+> 缺口主要来自 SSFM 步长未收敛：62.5 m 下 5ch/7ch 无泵残差降到 −0.62/−0.95 dB，
+> 不再是 3 dB 级问题，见 §11。
+
+## 11. 步长收敛与重生成（WP5a）
+
+### 11.1 证据：500 m 的 5/7ch 未收敛
+
+同一份 `input_*` 波形只改变 `coarse_step_size_m` 重跑 SSFM，中心信道
+`SNR_NLI`（无泵）：
+
+| 步长 | 3ch | 5ch | 7ch |
+|---:|---:|---:|---:|
+| 500 m | 36.778 | 34.794 | 32.267 |
+| 250 m | 36.743 | 36.127 | 34.279 |
+| 125 m | 36.720 | 36.344 | 35.334 |
+| 62.5 m | 36.708 | 36.331 | 36.274 |
+| 31.25 m | 36.702 | 36.325 | 36.274 |
+| 15.625 m | 36.698 | 36.321 | 36.271 |
+| **500 m 相对收敛值的 SNR 差** | **+0.08 dB** | **−1.53 dB** | **−4.01 dB** |
+
+负值表示 500 m 高估 NLI（SNR 偏低）。最后一步（31.25→15.625 m）的变化都
+<0.0031 dB；以 31.25 m 为参考，62.5 m 的增量也只有 0.0001–0.0062 dB。
+
+7ch 泵浦配置（同一 `input_7ch`，0.2 W）：
+
+| 配置 | 500 m | 62.5 m | 31.25 m | 500 m 伪影 |
+|---|---:|---:|---:|---:|
+| 前向 0.2 W | 17.636 | 19.321 | 19.315 | −1.68 dB |
+| 后向 0.2 W | 31.952 | 35.868 | 35.868 | −3.92 dB |
+
+因此：**旧 `examples/dra_reference/` 的 5ch/7ch 数据（含 WP3 耗尽数据集）
+是未收敛的，只能作为历史/趋势参考，不能用于基准或残差定标**。3ch 在 500 m
+已经收敛（0.08 dB），旧 3ch 数据仍可用。
+
+### 11.2 走离判据
+
+每步的群速度走离按
+
+```text
+Δτ = 2π · Δf · |β2| · dz        （seconds）
+walkoff_symbols = Δτ · Rs
+```
+
+计算，`Δf` 取最外信道相对中心信道的频偏。经验判据是每步走离
+≲0.12–0.15 symbol：
+
+| 数据集 | 最外偏移 | 500 m 走离 | 62.5 m 走离 | 0.15 symbol 建议步长 |
+|---|---:|---:|---:|---:|
+| 3ch | 100 GHz | 0.314 | 0.039 | 239 m |
+| 5ch | 200 GHz | 0.628 | 0.079 | 119 m |
+| 7ch | 300 GHz | 0.942 | 0.118 | 80 m |
+
+62.5 m 对所有数据集都满足判据；7ch 若需要额外余量可用 31.25 m，但
+62.5 m 的最后一步增量已 <0.01 dB。
+
+### 11.3 收敛数据集
+
+| 文件 | 内容 | 步长 |
+| --- | --- | --- |
+| `examples/dra_reference_converged/dra_reference.{json,npz}` | 3/5/7ch、5 配置、未耗尽 | 62.5 m |
+| `examples/dra_reference_converged/dra_reference_depleted.{json,npz}` | 3/5/7ch、1ch、功率扫描、耗尽 | 62.5 m |
+| `examples/dra_reference_converged/depleted_7ch_compare.json` | 7ch 前向 0.2 W 与解析 hybrid/H3 的对照 | — |
+| `examples/dra_reference_converged/step_convergence.json` | 步长探针原始结果 | 500→31.25 m |
+
+复制命令：
+
+```bash
+python examples/generate_dra_reference.py \
+    --output-dir examples/dra_reference_converged --coarse-step-m 62.5 --depleted
+
+# 只重跑步长探针（读历史 input_*，不修改任何数据）
+PYTHONPATH=src python examples/check_dra_step_convergence.py
+```
+
+数据集元数据新增：
+
+| 键 | 含义 |
+| --- | --- |
+| `coarse_step_m` | 顶层与逐数据集的实际 SSFM 步长 |
+| `pump_model` | `"undepleted"` 或 `"depleted"` |
+| `nli_method` | 与历史数据集相同的 NLI 提取口径 |
+| `step_criterion` | 走离公式、0.15 symbol 目标、逐数据集建议步长 |
+| `step_convergence` | 逐数据集的无泵中心 SNR、最后两档增量、500 m 伪影、走离 |
+| `step_converged` / `step_artifact_500m_db` | 便于直接引用的扁平字段 |
+
+`step_artifact_500m_db = SNR(500 m) − SNR(收敛步长)`，负值表示 500 m
+高估 NLI。所有新数据集均为 `step_converged: true`。
+
+### 11.4 收敛后的解析对照
+
+用 `network-nlo-eval` 的 `hybrid_raman_paper`（仓库 HEAD `3756e4f`，
+`scripts/dra_waveform_compare.py` 只读调用）对照 62.5 m 波形：
+
+| 场景 | 波形（62.5 m） | 解析 hybrid | 残差（解析−波形） |
+| --- | ---: | ---: | ---: |
+| 3ch 无泵 | 36.708 | 36.328 | −0.380 |
+| 5ch 无泵 | 36.331 | 35.706 | −0.624 |
+| 7ch 无泵 | 36.274 | 35.326 | −0.948 |
+| 7ch 前向 0.2 W | 19.321 | 23.387 | +4.066 |
+| 7ch 后向 0.2 W | 35.868 | 35.171 | −0.697 |
+
+无泵残差从“随信道数增长到 3 dB”降到 ≤1 dB，说明旧 5/7ch 的 N 依赖缺口
+主要是步长伪影。**前向 0.2 W 的 +4.07 dB 残差没有被步长解释**（500 m→31.25 m
+只闭合 1.68 dB），仍属于强前向增益下 SPM 积累的 GN 适用域问题，按 §10.3
+保留为口径界，不通过调参消除。上表 7ch 前向/后向行使用**未耗尽**波形，
+而解析默认是耗尽口径；前向 0.2 W 的同口径（耗尽波形）对照见 §11.5。
+
+### 11.5 7ch 耗尽前向泵的同口径对照
+
+`dra_reference_converged/dra_reference_depleted.json` 现在包含 7ch。取
+7ch 前向 0.2 W 的中心信道（62.5 m、耗尽模型）：
+
+| 量 | SNR_NLI (dB) | 相对波形残差 |
+| --- | ---: | ---: |
+| 波形（耗尽，62.5 m） | 22.384 | — |
+| 解析 hybrid（`pump_depletion=True`） | 23.387 | +1.003 |
+| 解析 H3（`pump_depletion=True`） | 23.583 | +1.199 |
+| `numerical_dra`（耗尽） | 23.334 | +0.950 |
+
+残差定义为“解析 − 波形”，正值表示解析更乐观。机器可读结果在
+`examples/dra_reference_converged/depleted_7ch_compare.json`。
+
+- 历史 500 m 耗尽波形的同一场景为 20.280 dB（用同一输入与耗尽模型重跑），
+  62.5 m 为 22.384 dB，**步长修正 +2.10 dB**；相对 hybrid 的残差从 +3.11 dB
+  降到 **+1.00 dB**，H3 从 +3.30 dB 降到 +1.20 dB。
+- 剩余 ~1.0–1.2 dB 与 3ch/5ch 前向场景的 0.7–1.3 dB 同量级，属于强前向
+  增益下单信道 SPM 积累的 GN 适用域边界，而不是步长或泵浦口径问题。
+- H3 只比 hybrid 多乐观 0.20 dB，与 WP4 的 0.1–0.3 dB 结论一致。
+
+### 11.6 验证与质量门
+
+```bash
+cd /home/zsig/Documents/gits/wt/physical-dra-step
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python -m pytest tests/test_distributed_raman.py -q
+/home/zsig/miniconda3/envs/nlo/bin/python -m ruff check \
+    examples/generate_dra_reference.py examples/check_dra_step_convergence.py
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python examples/check_dra_step_convergence.py
+```
+
+验收数据点：
+
+- 3ch 收敛后与旧 500 m 差 0.07 dB（<0.1 dB）；
+- 5ch/7ch 无泵中心 SNR 为 36.331/36.274 dB，与 WP4 探针一致；
+- 7ch 无泵与 hybrid 的差降到 −0.95 dB（约 1 dB 量级）；
+- 7ch 耗尽前向 0.2 W 中心 SNR 22.384 dB，相对 hybrid/H3 残差 +1.00/+1.20 dB；
+- 历史 `undepleted` 路径的逐位兼容测试继续通过。
