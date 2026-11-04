@@ -39,6 +39,8 @@ MODULATION = "DP-QPSK"
 SYMBOL_RATE_HZ = 50e9
 SPS = 4
 ROLL_OFF = 0.1
+#: NLI 分析带宽与解析 GN 模型对齐：取符号率（50 GHz），而不是含滚降的 55 GHz。
+NLI_ANALYSIS_BANDWIDTH_HZ = SYMBOL_RATE_HZ
 LAUNCH_POWER_DBM_PER_POL = 0.0
 
 FIBER_LENGTH_KM = 100.0
@@ -270,6 +272,11 @@ def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
             "sample_rate_hz": float(spec["sample_rate_hz"]),
             "num_samples": int(wdm_input.data.shape[-1]),
             "channel_bandwidth_hz": channel_bandwidth_hz,
+            "nli_analysis_bandwidth_hz": NLI_ANALYSIS_BANDWIDTH_HZ,
+            "nli_definition": (
+                "In-band additive NLI after one complex common-gain projection NL-a*LIN; "
+                "50 GHz ideal rectangular analysis band; SNR_NLI=signal/NLI; no ASE."
+            ),
             "configs": {},
         }
 
@@ -292,7 +299,7 @@ def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
                     linear_output.data,
                     spec["sample_rate_hz"],
                     float(offset),
-                    channel_bandwidth_hz,
+                    NLI_ANALYSIS_BANDWIDTH_HZ,
                 )
                 channel_powers.append(power)
                 nli_powers.append(nli_power)
