@@ -1,0 +1,14 @@
+{
+  "center_channel_index": 76,
+  "center_freq_offset_hz": 37500000000.0,
+  "signal_power_w": 4.5961706017973206e-05,
+  "nli_power_w": 8.717884768634073e-08,
+  "nli_power_raw_w": 5.4674313930774875e-05,
+  "snr_nli_db": 27.219850162688523,
+  "common_gain_db": -0.008645864668455624,
+  "common_phase_deg": 66.06931649376224,
+  "step_m": 0.244140625,
+  "elapsed_s": 531.1971729742363,
+  "modulation": "GAUSSIAN",
+  "num_samples": 11520
+}

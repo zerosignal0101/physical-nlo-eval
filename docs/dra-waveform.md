@@ -630,3 +630,279 @@ PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python examples/check_dra_step
 - 7ch 无泵与 hybrid 的差降到 −0.95 dB（约 1 dB 量级）；
 - 7ch 耗尽前向 0.2 W 中心 SNR 22.384 dB，相对 hybrid/H3 残差 +1.00/+1.20 dB；
 - 历史 `undepleted` 路径的逐位兼容测试继续通过。
+
+## 12. 全 WDM 参考（WP7：c57 / cl152）
+
+本节把参考从 3/5/7ch、100 GHz 间隔、50 GBd 扩展到
+`network-nlo-eval` 的 `c_57ch` / `cl_152ch`：75 GHz 栅格、64 GBd、
+C 或 C+L 全 WDM。数据在 `examples/dra_reference_wide/`，不覆盖旧目录。
+
+### 12.1 计划与数据文件
+
+| 项目 | c57 | cl152 |
+| --- | --- | --- |
+| 信道数 | 57 | 152 |
+| 间隔 | 75 GHz | 75 GHz |
+| 中心频率 | 193.75 THz | 190.15 THz |
+| 符号率 / RRC | 64 GBd / 0.1 | 64 GBd / 0.1 |
+| 单信道采样率 | 256 GHz (4 sps) | 256 GHz (4 sps) |
+| 合波采样率 | 4.608 THz | 11.52 THz |
+| 整数重采样比 | 18 | 45 |
+| 占用带宽 / NLI 分析带宽 | 70.4 / 64 GHz | 70.4 / 64 GHz |
+| 单信道样本数 | 1,024 (256 symbols) | 512 (128 symbols) |
+| 总样本数 | 18,432 | 23,040 |
+| 配置 | `nopump`、`fwd_0p20w`、`bwd_0p20w` | `nopump`、`bwd_sixpumps`、`fwd_0p20w` |
+| 主数据步长 | 0.48828125 m | 0.244140625 m |
+| 收敛标记 | `step_converged: true` | `step_converged: false` |
+
+文件：
+
+| 文件 | 内容 |
+| --- | --- |
+| `examples/dra_reference_wide/c57.{json,npz}` | 57ch、256 symbols、3 配置 |
+| `examples/dra_reference_wide/cl152.{json,npz}` | 152ch、128 symbols、3 配置 |
+| `examples/dra_reference_wide/step_convergence.json` | 64-symbol 步长探针原始结果 |
+| `examples/dra_reference_wide/analytic_compare.json` | 只读调用 `hybrid_raman_paper` 的自检 |
+
+`npz` 数组命名与旧数据一致：`input_<tag>`、`bits_<tag>`、`offsets_<tag>`、
+`nl_<tag>_<config>`、`lin_<tag>_<config>`；波形为 `complex64` 压缩。
+每个计划的 npz 均 <10 MB。JSON 顶层包含 `plan`、`fiber`、`signal`、`pump`、
+`nli_analysis_bandwidth_hz`、`coarse_step_m`、`step_converged`、
+`step_artifact_500m_db`、`step_convergence`、`num_samples` 与 `configs`；
+每个 `per_channel` 行包含 `freq_offset_hz`（相对计划中心）、
+`signal_power_w`、`nli_power_w`、`snr_nli_db`、`on_off_gain_db`、
+`common_gain_db`、`common_phase_deg`。
+
+### 12.2 步长收敛：全 WDM 远比 3/5/7ch 苛刻
+
+用 64 symbols、seed 20261104、`nopump`、中心信道 `SNR_NLI` 做探针
+（`step_convergence.json`）：
+
+| 步长 (m) | c57 SNR (dB) | cl152 SNR (dB) |
+|---:|---:|---:|
+| 500 | 12.4754 | 3.3002 |
+| 250 | 14.3634 | 7.3105 |
+| 125 | 17.4960 | 9.7827 |
+| 62.5 | 19.1984 | 11.7409 |
+| 31.25 | 24.1318 | 15.1253 |
+| 15.625 | 25.8553 | 18.3583 |
+| 7.8125 | 29.1510 | 21.0737 |
+| 3.90625 | 31.5150 | 24.1045 |
+| 1.953125 | 32.0342 | 27.1552 |
+| 0.9765625 | 32.3698 | 30.1200 |
+| 0.48828125 | **32.3697** | 33.2165 |
+| 0.244140625 | — | 34.2264* |
+
+`*` 0.244 m 的 cl152 点是同一 64-symbol 输入的补充诊断，不在
+`step_convergence.json` 的自动档位内；它说明 0.488 m 仍未收敛。
+
+- **c57 在 0.48828125 m 收敛**：最后两档增量 −2.2×10⁻⁵ dB，满足
+  `<0.01 dB`；`converged_step_m` = 0.48828125 m。
+- **cl152 在 0.48828125 m 未收敛**：最后两档增量 +3.10 dB；补充探针
+  继续加密到 0.244 / 0.122 m，得到 34.2264 / 34.6793 dB，增量
+  +1.01 / +0.45 dB。按 `NLI = N_p + C·dz^p` 三点拟合（p≈1.43）外推
+  收敛值约 **34.98 dB**，0.122 m 距外推值约 0.30 dB。严格 0.01 dB
+  判据需要 ~0.002 m，运行时间不可接受；主数据用 0.244140625 m，
+  并明确记录 `step_converged: false`，不伪造收敛。
+- **500 m 的伪影是灾难性的**：`step_artifact_500m_db` 为
+  −19.89 dB (c57) / −29.92 dB (cl152)。全 WDM 的 500 m 结果只能作为
+  历史趋势，不能用于基准或校准。
+
+#### 12.2.1 采样率/混叠：1× 采样率会系统性高估 NLI
+
+152ch 的占用带宽 11.32 THz 与 11.52 THz 采样率的 Nyquist 带宽只差
+~62 GHz；三次非线性产物会折叠回中心信道，污染 NLI。用同一 64-symbol
+输入、同一 0.244 m 步长，把合波采样率提高到 2× / 3×：
+
+| 计划 | 步长 (m) | 1× SNR | 2× SNR | 3× SNR | 1×→2× 偏差 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| c57 | 0.488 | 32.3697 | 32.7826 | — | +0.41 dB |
+| c57 (256 sym) | 0.488 | 34.5879 | 35.4759 | — | +0.89 dB |
+| cl152 | 0.977 | 30.1200 | 31.4344 | 31.4316 | +1.31 dB |
+| cl152 | 0.488 | 33.2165 | 34.4813 | — | +1.27 dB |
+| cl152 | 0.244 | 34.2264 | 35.6347 | — | +1.41 dB |
+
+- 2× 与 3× 在 0.977 m 只差 **0.003 dB**，说明 2× 已足够消除混叠；
+  3× 没有再降低 NLI。
+- 2× 的 cl152 三点（0.977/0.488/0.244 = 31.4344/34.4813/35.6347 dB）
+  满足 `NLI = N_p + C·dz^p`（p≈2.13），外推收敛值
+  **≈ 36.05 dB**；0.244 m 距外推值约 0.42 dB。
+- 因此 **cl152 的 alias-free 收敛估计是 36.0 dB**；1× 的 34.98 dB
+  低估约 1.1 dB。主数据仍用 1×（运行时间减半、与旧数据同口径），
+  文档和对照结果必须标注这个 ~1.1–1.4 dB 的系统偏差。
+
+#### 12.2.2 记录长度与 seed 集成：绝对 NLI 有 1–2 dB 统计散布
+
+步长探针用 64 symbols 足以判断**步长趋势**，但不足以给出**绝对 NLI**。
+固定 c57 nopump、0.488 m，改变记录长度/seed：
+
+| symbols | 64 | 128 | 256 (seed 20261104) | 256 (seed 20261105) | 512 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 中心 SNR (dB) | 32.370 | 32.825 | 34.588 | 32.709 | 33.722 |
+
+- 五个点没有单调趋势，均值 **33.24 dB、样本标准差 0.90 dB**；
+  单次 256-symbol 实现的散布约 ±1–2 dB，远大于 3/5/7ch 的
+  0.3–0.5 dB。全 WDM 的波形残差必须用多 seed 集成，不能拿单次
+  实现做 0.1 dB 级比较。
+- 前向泵的记录长度依赖更严重：c57 `fwd_0p20w`、0.488 m，
+  64/128/256/512 symbols 的中心 SNR 为
+  **26.78 / 23.50 / 20.13 / 14.15 dB**（NLI 随记录长度持续增长，
+  512 symbols 仍未饱和）。因此 **57ch 前向泵的 256-symbol 波形不能
+  用作绝对校准**；网络侧对照里的 +4.5 dB 残差是记录长度伪影，
+  不是模型物理解释。后向泵/无泵没有这个单调发散，但同样受
+  ±1–1.5 dB 的 seed 散布影响。
+- 64-symbol 步长探针的 `snr_nli_db` 只用于比较相邻步长；主数据的
+  `per_channel` 用 128/256 symbols，仍建议多 seed 复算。
+
+走离判据（`2π·Δf_max·|β2|·dz·Rs`）：
+
+| 计划 | Δf_max | 500 m | 62.5 m | 31.25 m | 0.488 m | 0.15-symbol 建议步长 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| c57 | 2.10 THz | 9.16 | 1.145 | 0.573 | 0.0089 | 8.19 m |
+| cl152 | 5.66 THz | 24.71 | 3.088 | 1.544 | 0.0241 | 3.04 m |
+
+**0.15-symbol 的走离目标对全 WDM 不适用**：c57 实测要到 0.009 symbol
+才收敛，cl152 在 0.024 symbol 仍未收敛。全 WDM 的步长由跨信道 FWM
+相位（而不是最外信道与中心的简单群速度走离）控制；这解释了为什么
+62.5/31.25 m 的“可行性”计时探针不能当作收敛步长。
+
+#### 12.2.3 调制格式口径
+
+波形是 DP-QPSK（恒模），GN 解析模型假设高斯符号。在 cl152、1×、
+0.244 m、64 symbols 下把符号换成复高斯（同功率、同 RRC）：
+
+| 调制 | 中心 SNR (dB) | NLI (W) |
+| --- | ---: | ---: |
+| DP-QPSK | 34.226 | 1.75×10⁻⁸ |
+| 复高斯 | 27.220 | 8.72×10⁻⁸ |
+
+高斯符号的 NLI 高 7.0 dB，说明**调制格式在 152ch 全负载下是一阶效应**。
+高斯控制本身峰值更高、步长未收敛，绝对值不能直接当基准；但它解释了
+为什么 GN 的 Gaussian 假设不能直接套到恒模 DP-QPSK 的 152ch 波形上。
+跨调制/跨模型的绝对值比较必须固定调制口径。
+
+### 12.3 解析自检（hybrid_raman_paper）
+
+用 `network-nlo-eval` 的 `hybrid_raman_paper` 只读对照 nopump 中心信道。
+解析侧使用与波形相同的平坦 α=0.162 dB/km、β₂=−21.7 ps²/km、
+n2 与 A_eff；`symbol_rate_hz=64e9`、
+`channel_bandwidth_source="symbol_rate"`、`pump_depletion=True`。
+
+**色散斜率不能取 0**：波形用 β₃=1e-4 ps³/km，按 network 的
+`_calc_beta3_from_s_d` 反解等价于 **S ≈ −0.0219 ps/(nm²·km)**。
+`check_dra_wideband_analytic.py` 和
+`dra_wideband_compare.fiber_from_reference` 都优先从
+`beta3_ps3_per_km` 反解 S；用默认 S=0.06 会把 cl152 中心 SNR 抬高
+约 0.46 dB（32.765 → 33.225），造成口径错配。
+
+结果在 `analytic_compare.json`，残差定义为“解析 − 波形”（正值表示解析更乐观）。
+
+| 计划 | 波形 | 波形 SNR (dB) | 解析 SNR (dB) | 残差 (dB) |
+| --- | --- | ---: | ---: | ---: |
+| c57 | 1×、256 sym、seed 20261104 | 34.588 | 33.133 | **−1.455** |
+| c57 | 1×、256 sym、seed 20261105 | 32.709 | 33.133 | **+0.424** |
+| c57 | 1× 两 seed 均值 | 33.649 | 33.133 | **−0.516** |
+| c57 | 2×、256 sym、seed 20261104 | 35.476 | 33.133 | **−2.343** |
+| cl152 | 1×、128 sym、0.244 m 主数据 | 32.473 | 32.765 | **+0.292** |
+| cl152 | 1×、64 sym、0.122 m 探针 | 34.679 | 32.765 | **−1.914** |
+| cl152 | 2×、64 sym、0.244 m 探针 | 35.635 | 32.765 | **−2.870** |
+| cl152 | 2× 三点外推（上界） | ≈36.05 | 32.765 | **≈−3.29** |
+
+- c57 的 1× 单 seed 残差在 −1.46…+0.42 dB 之间，两 seed 均值 −0.52 dB，
+  与 3/5/7ch 的 ±1 dB 量级一致；但单次实现的散布有 ~1.9 dB，不能只看
+  一个 seed。
+- c57 的 2× 数据（同一 seed）把波形抬高 0.89 dB，残差变为 −2.34 dB；
+  说明 1× 的 +0.42…−1.46 dB 里包含约 0.4–0.9 dB 的混叠偏差。
+- **cl152 的 64-symbol 探针与 128-symbol 主数据差 3.2 dB**
+  （32.473…35.635 dB）。这不是单调的步长/混叠趋势：128-symbol 1×
+  主数据给出 +0.29 dB（解析略乐观），64-symbol 0.122/2× 探针给出
+  −1.9…−2.9 dB（解析略保守）。差异主要来自全 WDM 的**单次实现
+  统计散布（2–3 dB）**，而不是解析模型的系统偏差。2× 外推的
+  36.05 dB 是单次 64-symbol 实现的上界，未被 128-symbol 主数据证实。
+- §12.2.3 的 QPSK-vs-高斯对照显示调制格式有 7 dB 的一阶影响，说明
+  GN 的 Gaussian 假设是 152ch 的一个真实口径项；但要把 2–3 dB 的
+  统计散布压到亚 dB，需要收敛的高斯控制 + 多 seed 2× 集成。
+- 因此：**57ch/152ch 的 nopump 与 backward 在 2–3 dB 统计预算内与
+  解析一致；单次实现的残差不能按 ±0.5 dB 引用。forward 不可用
+  （记录长度伪影）。**
+
+### 12.4 限制
+
+- **平坦 α**：所有信道用 1550 nm 的 0.162 dB/km；`SMF_100KM` 多项式在
+  C+L 边缘约 0.162–0.178 dB/km，L 波段损耗被低估。
+- **β₃ 口径已对齐**：波形 β₃=1e-4 ps³/km 对应 S≈−0.0219；解析侧必须
+  用这个斜率。用 S=0.06（β₃≈0.133）会让 cl152 中心 SNR 高约 0.46 dB。
+- **耗尽模型**：用计划中心频率的带内总功率驱动泵浦耗尽；不建模
+  泵浦-泵浦拉曼转移、泵浦 ASE；通道间 ISRS 未建模（`raman_r3=None`）。
+- **规模/记录长度**：c57 256 symbols、cl152 128 symbols。全 WDM 的
+  NLI 统计散布远大于 3/5/7ch：c57 nopump 64/128/256/512 symbols 与
+  两个 256-symbol seed 的均值为 33.24 dB、标准差 0.90 dB。单次实现
+  不能用于 0.1–0.2 dB 级比较；需要多 seed 集成。
+- **前向泵记录长度伪影**：c57 `fwd_0p20w` 的 NLI 随记录长度持续
+  增长（64→512 symbols，SNR 26.78→14.15 dB，512 仍未饱和）。
+  57ch 前向泵的 256-symbol 波形不能用作绝对校准。
+- **cl152 步长/统计**：`step_converged: false`。2× 64-symbol 三点外推
+  给出 36.05 dB（单次实现的上界）；128-symbol 1× 主数据是 32.47 dB。
+  两者的 3.2 dB 差主要是记录长度/seed 散布（2–3 dB），不是步长
+  （0.244 m 与 0.122 m 只差 0.45 dB）或混叠（3× 与 2× 只差 0.003 dB）。
+- **全 WDM 统计预算**：c57 nopump 的 5 次测量标准差 0.90 dB；cl152
+  的 64/128-symbol 与 1×/2× 测量跨 3.2 dB。任何全 WDM 残差都应带
+  “单次实现 ±2–3 dB”的标注，除非做了多 seed 集成。
+- **调制口径**：波形是恒模 DP-QPSK，GN 假设高斯；152ch 下两者 NLI
+  相差 7 dB。跨调制/跨模型比较必须固定调制口径。
+
+### 12.5 复现
+
+```bash
+cd /home/zsig/Documents/gits/wt/physical-dra-wideband
+
+# 1) 步长探针（64 symbols，约 3.5 min + 8.5 min）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/generate_dra_reference.py --wideband --wideband-probe-only \
+    --wideband-plans c57 --wideband-dir /tmp/dra_wide_c57
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/generate_dra_reference.py --wideband --wideband-probe-only \
+    --wideband-plans cl152 --wideband-dir /tmp/dra_wide_cl152
+# 合并两个 step_convergence.json 的 plans 段到 examples/dra_reference_wide/
+
+# 2) 主数据（复用探针；c57 约 32 min，cl152 约 75 min）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/generate_dra_reference.py --wideband --reuse-probe \
+    --wideband-plans c57 --wideband-step-map c57=0.48828125
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/generate_dra_reference.py --wideband --reuse-probe \
+    --wideband-plans cl152 --wideband-symbols-map cl152=128 \
+    --wideband-step-map cl152=0.244140625
+# 第二个统计 seed（可选，约 32 min）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/generate_dra_reference.py --wideband --reuse-probe \
+    --wideband-plans c57 --wideband-step-map c57=0.48828125 --seed 20261105
+
+# 3) 解析自检（只读调用 network-nlo-eval）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_wideband_analytic.py
+
+# 4) 质量门
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python -m pytest tests/test_distributed_raman.py -q
+/home/zsig/miniconda3/envs/nlo/bin/python -m ruff check \
+    examples/generate_dra_reference.py examples/check_dra_wideband_analytic.py \
+    examples/check_dra_wideband_convergence.py \
+    tests/test_distributed_raman.py
+```
+
+§12.2.1/§12.2.2 的原始探针 JSON 在
+`examples/dra_reference_wide/diagnostics/`。采样率/记录长度诊断可用
+`examples/check_dra_wideband_convergence.py` 复现：
+
+```bash
+# 混叠：cl152 nopump，0.488/0.244 m，1×/2×/3×
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_wideband_convergence.py --plan cl152 --mode oversample \
+    --config nopump --steps 0.48828125 0.244140625 --factors 1 2 3 --symbols 64
+
+# 记录长度/seed：c57 nopump，0.488 m
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_wideband_convergence.py --plan c57 --mode record \
+    --config nopump --steps 0.48828125 --symbols 64 128 256 512 \
+    --seeds 20261104 20261105
+```

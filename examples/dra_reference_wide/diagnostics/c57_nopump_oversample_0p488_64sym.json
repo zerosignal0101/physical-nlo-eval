@@ -1,0 +1,38 @@
+{
+  "plan": {
+    "name": "c57",
+    "n_channels": 57,
+    "channel_spacing_hz": 75000000000.0,
+    "center_frequency_hz": 193750000000000.0,
+    "symbol_rate_hz": 64000000000.0,
+    "roll_off": 0.1,
+    "sps": 4,
+    "sample_rate_hz": 9216000000000.0,
+    "channel_sample_rate_hz": 256000000000.0,
+    "resample_ratio": 36,
+    "launch_power_dbm_per_pol": 0.0,
+    "num_symbols": 256,
+    "samples_per_channel": 1024,
+    "occupied_bandwidth_hz": 70400000000.0,
+    "first_channel_offset_hz": -2100000000000.0,
+    "last_channel_offset_hz": 2100000000000.0
+  },
+  "probe_num_symbols": 64,
+  "config": "nopump",
+  "oversample_factor": 2,
+  "steps": [
+    {
+      "center_channel_index": 28,
+      "center_freq_offset_hz": 0.0,
+      "signal_power_w": 4.603195083977416e-05,
+      "nli_power_w": 2.4255102633765146e-08,
+      "nli_power_raw_w": 4.541352099912677e-05,
+      "snr_nli_db": 32.78256264085294,
+      "common_gain_db": 0.0013603244043397023,
+      "common_phase_deg": -59.5594748344154,
+      "step_m": 0.48828125,
+      "elapsed_s": 209.09530882677063,
+      "num_samples": 9216
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "plan": {
+    "name": "cl152",
+    "n_channels": 152,
+    "channel_spacing_hz": 75000000000.0,
+    "center_frequency_hz": 190150000000000.0,
+    "symbol_rate_hz": 64000000000.0,
+    "roll_off": 0.1,
+    "sps": 4,
+    "sample_rate_hz": 34560000000000.0,
+    "channel_sample_rate_hz": 256000000000.0,
+    "resample_ratio": 135,
+    "launch_power_dbm_per_pol": 0.0,
+    "num_symbols": 256,
+    "samples_per_channel": 1024,
+    "occupied_bandwidth_hz": 70400000000.0,
+    "first_channel_offset_hz": -5662500000000.0,
+    "last_channel_offset_hz": 5662500000000.0
+  },
+  "probe_num_symbols": 64,
+  "config": "nopump",
+  "oversample_factor": 3,
+  "steps": [
+    {
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.6555039760986025e-05,
+      "nli_power_w": 3.348171769324528e-08,
+      "nli_power_raw_w": 5.630272653490712e-05,
+      "snr_nli_db": 31.431589716478,
+      "common_gain_db": 0.010374268568758019,
+      "common_phase_deg": 66.76441440652029,
+      "step_m": 0.9765625,
+      "elapsed_s": 562.6677049929276,
+      "num_samples": 34560
+    }
+  ]
+}

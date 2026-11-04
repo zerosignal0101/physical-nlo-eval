@@ -33,8 +33,11 @@ from physics_nlo_eval.core.signal import Signal, SignalContext
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_DIR = REPO_ROOT / "examples" / "dra_reference"
 CONVERGED_DIR = REPO_ROOT / "examples" / "dra_reference_converged"
+WIDEBAND_DIR = REPO_ROOT / "examples" / "dra_reference_wide"
 GENERATOR_PATH = REPO_ROOT / "examples" / "generate_dra_reference.py"
 STEP_CHECKER_PATH = REPO_ROOT / "examples" / "check_dra_step_convergence.py"
+CONVERGENCE_CHECKER_PATH = REPO_ROOT / "examples" / "check_dra_wideband_convergence.py"
+EXAMPLES_DIR = REPO_ROOT / "examples"
 
 
 def _signal(
@@ -289,6 +292,55 @@ def _load_generator():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_wideband_convergence_diagnostic_oversample(monkeypatch) -> None:
+    """采样率诊断脚本应在小 plan 上返回每个 factor 的有限 SNR。"""
+    import argparse
+    import importlib.util
+    import sys
+
+    if str(EXAMPLES_DIR) not in sys.path:
+        sys.path.insert(0, str(EXAMPLES_DIR))
+    spec = importlib.util.spec_from_file_location(
+        "_dra_wideband_convergence_diagnostic", CONVERGENCE_CHECKER_PATH
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    generator = module.generator
+    plan = generator.WidebandPlan(
+        name="probe3",
+        n_channels=3,
+        channel_spacing_hz=75e9,
+        center_frequency_hz=193.75e12,
+        symbol_rate_hz=64e9,
+        roll_off=0.1,
+        sps=4,
+        sample_rate_hz=4.608e12,
+        num_symbols=64,
+    )
+    monkeypatch.setitem(generator.WIDEBAND_PLANS, "probe3", plan)
+    monkeypatch.setitem(generator.WIDEBAND_CONFIGS, "probe3", {"nopump": []})
+    args = argparse.Namespace(
+        plan="probe3",
+        mode="oversample",
+        config="nopump",
+        steps=[500.0],
+        symbols=[64],
+        factors=[1, 2],
+        seeds=[1],
+        pump_model="depleted",
+        output=None,
+    )
+    rows = module._rows(args)
+    assert len(rows) == 2
+    assert {row["sample_rate_factor"] for row in rows} == {1, 2}
+    for row in rows:
+        assert np.isfinite(row["snr_nli_db"])
+        assert row["snr_nli_db"] > 0
+        assert row["num_symbols"] == 64
 
 
 def test_undepleted_path_matches_committed_waveform_bit_exactly() -> None:
@@ -588,4 +640,181 @@ def test_step_convergence_checker_core_on_3ch() -> None:
     assert checker.failed_increments(report, 0.01) == []
     # 人为收紧容差时应能报出失败。
     assert len(checker.failed_increments(report, 0.001)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 全 WDM（c57 / cl152）
+# ---------------------------------------------------------------------------
+
+
+def test_wideband_plan_validation_and_resample_ratio() -> None:
+    """两个全 WDM 计划的栅格/采样率/偏移必须自洽，并拒绝非法计划。"""
+    generator = _load_generator()
+    c57 = generator.WIDEBAND_PLANS["c57"]
+    cl152 = generator.WIDEBAND_PLANS["cl152"]
+
+    assert c57.n_channels == 57
+    assert cl152.n_channels == 152
+    for plan, ratio in ((c57, 18), (cl152, 45)):
+        assert plan.channel_spacing_hz == 75e9
+        assert plan.symbol_rate_hz == 64e9
+        assert plan.roll_off == 0.1
+        assert plan.resample_ratio == ratio
+        assert plan.channel_sample_rate_hz == 256e9
+        assert plan.sample_rate_hz == ratio * plan.channel_sample_rate_hz
+        assert plan.offsets_hz.shape == (plan.n_channels,)
+        assert np.isclose(plan.offsets_hz[0], -plan.offsets_hz[-1])
+        assert plan.samples_per_channel == plan.num_symbols * plan.sps
+
+    def make(**overrides):
+        fields = {
+            "name": "bad",
+            "n_channels": 3,
+            "channel_spacing_hz": 75e9,
+            "center_frequency_hz": 193.75e12,
+            "symbol_rate_hz": 64e9,
+            "roll_off": 0.1,
+            "sps": 4,
+            "sample_rate_hz": 4.608e12,
+        }
+        fields.update(overrides)
+        return generator.WidebandPlan(**fields)
+
+    # 非整数重采样比。
+    with pytest.raises(ValueError, match="integer multiple"):
+        make(sample_rate_hz=4.7e12)
+    # 信道重叠。
+    with pytest.raises(ValueError, match="overlap"):
+        make(channel_spacing_hz=60e9)
+    # 采样率不足以覆盖合波带宽。
+    with pytest.raises(ValueError, match="alias"):
+        make(n_channels=57, sample_rate_hz=2.304e12)
+
+
+def test_wideband_nopump_matches_undepleted_on_short_record() -> None:
+    """全 WDM 代码路径的 nopump 结果应与 undepleted 逐位一致。"""
+    generator = _load_generator()
+    plan = generator.WidebandPlan(
+        name="probe3",
+        n_channels=3,
+        channel_spacing_hz=75e9,
+        center_frequency_hz=193.75e12,
+        symbol_rate_hz=64e9,
+        roll_off=0.1,
+        sps=4,
+        sample_rate_hz=4.608e12,
+        num_symbols=32,
+    )
+    signal, _, _ = generator.build_wideband_dataset(plan, seed=1)
+    depleted = generator.make_wideband_fiber(
+        [], nonlinear=True, pump_model="depleted", coarse_step_m=500.0
+    ).forward(signal)
+    undepleted = generator.make_wideband_fiber(
+        [], nonlinear=True, pump_model="undepleted", coarse_step_m=500.0
+    ).forward(signal)
+    assert np.array_equal(depleted.data, undepleted.data)
+
+
+def test_wideband_step_probe_core_on_short_record() -> None:
+    """步长探针核心函数应返回可审计的逐档 SNR/走离/耗时字段。"""
+    generator = _load_generator()
+    plan = generator.WidebandPlan(
+        name="probe3",
+        n_channels=3,
+        channel_spacing_hz=75e9,
+        center_frequency_hz=193.75e12,
+        symbol_rate_hz=64e9,
+        roll_off=0.1,
+        sps=4,
+        sample_rate_hz=4.608e12,
+        num_symbols=32,
+    )
+    report = generator.wideband_step_convergence(
+        plan,
+        steps_m=(500.0, 250.0),
+        num_symbols=32,
+        seed=1,
+        pump_model="depleted",
+        extend=False,
+    )
+    assert len(report["steps"]) == 2
+    for row in report["steps"]:
+        assert row["step_m"] > 0
+        assert row["n_steps"] == int(np.ceil(100e3 / row["step_m"]))
+        assert np.isfinite(row["snr_nli_db"])
+        assert row["walkoff_per_step_symbols"] > 0
+        assert row["elapsed_s"] >= 0
+    assert isinstance(report["step_converged"], bool)
+    assert report["metric"] == "nopump center-channel snr_nli_db"
+    assert report["tolerance_db"] == 0.01
+
+
+def test_wideband_reference_dataset_schema() -> None:
+    """已提交的全 WDM 数据应包含计划、光纤、步长与逐信道指标。"""
+    for name, n_channels, ratio, configs in (
+        ("c57", 57, 18, {"nopump", "fwd_0p20w", "bwd_0p20w"}),
+        ("cl152", 152, 45, {"nopump", "bwd_sixpumps", "fwd_0p20w"}),
+    ):
+        json_path = WIDEBAND_DIR / f"{name}.json"
+        npz_path = WIDEBAND_DIR / f"{name}.npz"
+        assert json_path.exists(), f"missing wideband metadata: {json_path}"
+        assert npz_path.exists(), f"missing wideband waveforms: {npz_path}"
+
+        metadata = json.loads(json_path.read_text(encoding="utf-8"))
+        assert metadata["dataset_family"] == "dra_wideband"
+        assert metadata["plan"]["name"] == name
+        assert metadata["plan"]["n_channels"] == n_channels
+        assert metadata["plan"]["resample_ratio"] == ratio
+        assert metadata["nli_analysis_bandwidth_hz"] == 64e9
+        assert metadata["signal"]["symbol_rate_hz"] == 64e9
+        assert metadata["coarse_step_m"] > 0
+        assert isinstance(metadata["step_converged"], bool)
+        assert metadata["step_converged"] == metadata["step_convergence"]["step_converged"]
+        assert metadata["num_samples"] == (
+            metadata["plan"]["samples_per_channel"] * ratio
+        )
+        assert set(metadata["configs"]) == configs
+        assert "fiber" in metadata and "pump" in metadata
+
+        with np.load(npz_path) as arrays:
+            input_key = f"input_{name}"
+            assert input_key in arrays
+            assert arrays[input_key].shape == (2, metadata["num_samples"])
+            for config in metadata["configs"].values():
+                nl = arrays[config["waveform_nonlinear_key"]]
+                lin = arrays[config["waveform_linear_key"]]
+                assert nl.shape == lin.shape == arrays[input_key].shape
+                assert np.all(np.isfinite(nl)) and np.all(np.isfinite(lin))
+                assert len(config["per_channel"]) == n_channels
+                first = config["per_channel"][0]
+                for key in (
+                    "freq_offset_hz",
+                    "signal_power_w",
+                    "nli_power_w",
+                    "snr_nli_db",
+                    "on_off_gain_db",
+                    "common_gain_db",
+                    "common_phase_deg",
+                ):
+                    assert key in first
+
+        # 每信道频偏相对计划中心，且关于 0 对称。
+        offsets = np.asarray(
+            [row["freq_offset_hz"] for row in metadata["configs"]["nopump"]["per_channel"]]
+        )
+        assert np.isclose(offsets[0], -offsets[-1])
+
+
+def test_wideband_analytic_compare_document() -> None:
+    """解析对照文档应存在，且 nopump 中心信道残差在 ~1 dB 量级。"""
+    path = WIDEBAND_DIR / "analytic_compare.json"
+    if not path.exists():
+        pytest.skip("analytic comparison has not been generated")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    for name in ("c57", "cl152"):
+        row = document["plans"][name]
+        assert row["plan"] == name
+        assert row["analytic"]["model"] == "hybrid_raman_paper"
+        assert row["analytic"]["config"] == "nopump"
+        assert abs(row["residual_db"]) < 2.5
 
