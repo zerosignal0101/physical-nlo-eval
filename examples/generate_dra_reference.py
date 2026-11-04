@@ -576,9 +576,15 @@ def generate(
 def generate_depleted(
     output_dir: Path, num_symbols: int, seed: int, coarse_step_m: float = COARSE_STEP_M
 ) -> None:
-    """生成泵浦耗尽数据集：3/5 信道、1 信道 SPM 探针、发射功率扫描。"""
+    """生成泵浦耗尽数据集：3/5/7 信道、1 信道 SPM 探针、发射功率扫描。
+
+    7ch 只在非默认步长的收敛数据中加入；历史 500 m 耗尽数据集保持 3/5ch，
+    以免改变已提交的默认输出。
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     record_step_metadata = coarse_step_m != COARSE_STEP_M
+    # 7ch 的 500 m 数据未收敛，因此只在收敛数据集（非 500 m）中生成。
+    depleted_tags = ("3ch", "5ch", "7ch") if record_step_metadata else ("3ch", "5ch")
     arrays: dict[str, np.ndarray] = {}
     metadata: dict = {
         "schema_version": 1,
@@ -644,8 +650,12 @@ def generate_depleted(
             f"{HISTORICAL_STEP_M} m; per-dataset step_artifact_500m_db records the residual "
             "difference of the historical step."
         )
+        metadata["notes"].append(
+            "The converged depleted dataset includes 7ch; the historical 500 m depleted "
+            "dataset stays at 3/5ch because its 7ch result is not step-converged."
+        )
 
-    for tag in ("3ch", "5ch"):
+    for tag in depleted_tags:
         spec = DATASETS[tag]
         _populate_dataset(
             arrays,

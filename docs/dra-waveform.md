@@ -336,7 +336,8 @@ nopump, fwd_0p10w, fwd_0p20w, bwd_0p10w, bwd_0p20w
 因此现有的 `band_nli_metrics` 流程可以直接复用。
 
 > 上述历史耗尽数据同样使用 500 m 步长，5ch 结果受步长伪影影响；收敛版本见
-> `examples/dra_reference_converged/dra_reference_depleted.*`（62.5 m）。
+> `examples/dra_reference_converged/dra_reference_depleted.*`（62.5 m），
+> 并在 3/5ch 之外加入 7ch（历史 500 m 的 7ch 未收敛，因此不进入默认数据）。
 
 分析脚本（不依赖解析仓）：
 
@@ -543,7 +544,8 @@ walkoff_symbols = Δτ · Rs
 | 文件 | 内容 | 步长 |
 | --- | --- | --- |
 | `examples/dra_reference_converged/dra_reference.{json,npz}` | 3/5/7ch、5 配置、未耗尽 | 62.5 m |
-| `examples/dra_reference_converged/dra_reference_depleted.{json,npz}` | 3/5ch、1ch、功率扫描、耗尽 | 62.5 m |
+| `examples/dra_reference_converged/dra_reference_depleted.{json,npz}` | 3/5/7ch、1ch、功率扫描、耗尽 | 62.5 m |
+| `examples/dra_reference_converged/depleted_7ch_compare.json` | 7ch 前向 0.2 W 与解析 hybrid/H3 的对照 | — |
 | `examples/dra_reference_converged/step_convergence.json` | 步长探针原始结果 | 500→31.25 m |
 
 复制命令：
@@ -572,7 +574,7 @@ PYTHONPATH=src python examples/check_dra_step_convergence.py
 
 ### 11.4 收敛后的解析对照
 
-用 `network-nlo-eval` 的 `hybrid_raman_paper`（仓库 HEAD `c69ba98`，
+用 `network-nlo-eval` 的 `hybrid_raman_paper`（仓库 HEAD `3756e4f`，
 `scripts/dra_waveform_compare.py` 只读调用）对照 62.5 m 波形：
 
 | 场景 | 波形（62.5 m） | 解析 hybrid | 残差（解析−波形） |
@@ -586,9 +588,32 @@ PYTHONPATH=src python examples/check_dra_step_convergence.py
 无泵残差从“随信道数增长到 3 dB”降到 ≤1 dB，说明旧 5/7ch 的 N 依赖缺口
 主要是步长伪影。**前向 0.2 W 的 +4.07 dB 残差没有被步长解释**（500 m→31.25 m
 只闭合 1.68 dB），仍属于强前向增益下 SPM 积累的 GN 适用域问题，按 §10.3
-保留为口径界，不通过调参消除。
+保留为口径界，不通过调参消除。上表 7ch 前向/后向行使用**未耗尽**波形，
+而解析默认是耗尽口径；前向 0.2 W 的同口径（耗尽波形）对照见 §11.5。
 
-### 11.5 验证与质量门
+### 11.5 7ch 耗尽前向泵的同口径对照
+
+`dra_reference_converged/dra_reference_depleted.json` 现在包含 7ch。取
+7ch 前向 0.2 W 的中心信道（62.5 m、耗尽模型）：
+
+| 量 | SNR_NLI (dB) | 相对波形残差 |
+| --- | ---: | ---: |
+| 波形（耗尽，62.5 m） | 22.384 | — |
+| 解析 hybrid（`pump_depletion=True`） | 23.387 | +1.003 |
+| 解析 H3（`pump_depletion=True`） | 23.583 | +1.199 |
+| `numerical_dra`（耗尽） | 23.334 | +0.950 |
+
+残差定义为“解析 − 波形”，正值表示解析更乐观。机器可读结果在
+`examples/dra_reference_converged/depleted_7ch_compare.json`。
+
+- 历史 500 m 耗尽波形的同一场景为 20.280 dB（用同一输入与耗尽模型重跑），
+  62.5 m 为 22.384 dB，**步长修正 +2.10 dB**；相对 hybrid 的残差从 +3.11 dB
+  降到 **+1.00 dB**，H3 从 +3.30 dB 降到 +1.20 dB。
+- 剩余 ~1.0–1.2 dB 与 3ch/5ch 前向场景的 0.7–1.3 dB 同量级，属于强前向
+  增益下单信道 SPM 积累的 GN 适用域边界，而不是步长或泵浦口径问题。
+- H3 只比 hybrid 多乐观 0.20 dB，与 WP4 的 0.1–0.3 dB 结论一致。
+
+### 11.6 验证与质量门
 
 ```bash
 cd /home/zsig/Documents/gits/wt/physical-dra-step
@@ -603,4 +628,5 @@ PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python examples/check_dra_step
 - 3ch 收敛后与旧 500 m 差 0.07 dB（<0.1 dB）；
 - 5ch/7ch 无泵中心 SNR 为 36.331/36.274 dB，与 WP4 探针一致；
 - 7ch 无泵与 hybrid 的差降到 −0.95 dB（约 1 dB 量级）；
+- 7ch 耗尽前向 0.2 W 中心 SNR 22.384 dB，相对 hybrid/H3 残差 +1.00/+1.20 dB；
 - 历史 `undepleted` 路径的逐位兼容测试继续通过。

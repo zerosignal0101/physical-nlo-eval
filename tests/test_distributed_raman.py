@@ -525,6 +525,7 @@ def test_converged_depleted_reference_dataset_schema() -> None:
     assert set(metadata["datasets"]) == {
         "3ch",
         "5ch",
+        "7ch",
         "1ch",
         "3ch_0p5mw",
         "3ch_1p0mw",
@@ -542,6 +543,25 @@ def test_converged_depleted_reference_dataset_schema() -> None:
                 lin = arrays[config["waveform_linear_key"]]
                 assert np.all(np.isfinite(nl)) and np.all(np.isfinite(lin))
                 assert len(config["per_channel"]) == dataset["n_channels"]
+
+    # 7ch 前向 0.2 W 的中心信道 SNR（62.5 m，耗尽模型）。
+    seven = metadata["datasets"]["7ch"]
+    seven_forward = seven["configs"]["fwd_0p20w"]["per_channel"][seven["center_channel_index"]]
+    assert abs(seven_forward["snr_nli_db"] - 22.384) < 0.02
+
+    compare_path = CONVERGED_DIR / "depleted_7ch_compare.json"
+    assert compare_path.exists(), f"missing 7ch analytic comparison: {compare_path}"
+    compare = json.loads(compare_path.read_text(encoding="utf-8"))
+    assert compare["pump_depletion"] is True
+    assert compare["pump_model"] == "depleted"
+    assert compare["coarse_step_m"] == 62.5
+    assert abs(compare["waveform_snr_nli_db"] - seven_forward["snr_nli_db"]) < 1e-9
+    assert abs(compare["analytic"]["hybrid_raman_paper"]["snr_nli_db"] - 23.387) < 0.01
+    assert abs(compare["analytic"]["pcfm_h3_raman"]["snr_nli_db"] - 23.583) < 0.01
+    assert 0.9 < compare["analytic"]["hybrid_raman_paper"]["residual_db"] < 1.1
+    assert 1.1 < compare["analytic"]["pcfm_h3_raman"]["residual_db"] < 1.3
+    assert 2.0 < compare["historical_500m"]["step_correction_db"] < 2.2
+    assert 3.0 < compare["historical_500m"]["analytic_residual_db"]["hybrid_raman_paper"] < 3.2
 
 
 def _load_step_checker():

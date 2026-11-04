@@ -1,0 +1,45 @@
+{
+  "generated_by": "read-only call to network-nlo-eval scripts/dra_waveform_compare.py",
+  "analytic_repo_head": "3756e4f",
+  "pump_depletion": true,
+  "reference_json": "examples/dra_reference_converged/dra_reference_depleted.json",
+  "dataset": "7ch",
+  "config": "fwd_0p20w",
+  "pump_model": "depleted",
+  "coarse_step_m": 62.5,
+  "center_channel_index": 3,
+  "waveform_snr_nli_db": 22.383676751100253,
+  "waveform_nli_w": 8.067973917399551e-07,
+  "analytic": {
+    "hybrid_raman_paper": {
+      "snr_nli_db": 23.386983852262603,
+      "residual_db": 1.0033071011623491
+    },
+    "buglia2024_ra_gn": {
+      "snr_nli_db": 23.386983852262603,
+      "residual_db": 1.0033071011623491
+    },
+    "pcfm_h3_raman": {
+      "snr_nli_db": 23.583092413207286,
+      "residual_db": 1.1994156621070324
+    },
+    "numerical_dra": {
+      "snr_nli_db": 23.334088826432303,
+      "residual_db": 0.95041207533205
+    }
+  },
+  "residual_definition": "analytic_snr_nli_db - waveform_snr_nli_db; positive means analytic is more optimistic",
+  "note": "Same 50 GHz NLI definition as the waveform reference; analytic runs use 1 mW/pol per channel and 7 channels.",
+  "historical_500m": {
+    "coarse_step_m": 500.0,
+    "waveform_snr_nli_db": 20.279982534793376,
+    "step_correction_db": 2.1036942163068773,
+    "analytic_residual_db": {
+      "hybrid_raman_paper": 3.1070013174692264,
+      "buglia2024_ra_gn": 3.1070013174692264,
+      "pcfm_h3_raman": 3.3031098784139097,
+      "numerical_dra": 3.054106291638927
+    },
+    "note": "recomputed from examples/dra_reference/dra_reference.npz input_7ch with pump_model='depleted' and coarse_step_size_m=500"
+  }
+}
