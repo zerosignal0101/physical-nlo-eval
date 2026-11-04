@@ -5,10 +5,14 @@
 
     python examples/generate_dra_reference.py
     python examples/generate_dra_reference.py --output-dir examples/dra_reference
+    python examples/generate_dra_reference.py --depleted            # 追加耗尽数据集
+    python examples/generate_dra_reference.py --depleted --skip-base
 
-输出 ``dra_reference.npz``（输入/输出复波形）和 ``dra_reference.json``
-（参数、逐信道功率/NLI/SNR、EVM 等元数据）。数据集刻意保持小规模：
-3/5 信道、50 GBd DP-QPSK、100 km 单跨，便于完整复现和逐位核对。
+默认输出 ``dra_reference.npz``（输入/输出复波形）和 ``dra_reference.json``
+（参数、逐信道功率/NLI/SNR、EVM 等元数据）。``--depleted`` 另行输出
+``dra_reference_depleted.{npz,json}``：3/5 信道耗尽参考、1 信道 SPM 探针，
+以及 3 信道前向泵的发射功率扫描。数据集刻意保持小规模：3/5 信道、
+50 GBd DP-QPSK、100 km 单跨，便于完整复现和逐位核对。
 """
 
 from __future__ import annotations
@@ -67,6 +71,8 @@ DATASETS = {
         "sample_rate_hz": 900e9,
     },
 }
+#: 单信道 SPM 探针（不属于默认数据集）。
+ONE_CHANNEL_DATASET = {"count": 1, "offsets_hz": np.array([0.0]), "sample_rate_hz": 100e9}
 
 CONFIGS: dict[str, list[PumpSpec]] = {
     "nopump": [],
@@ -76,18 +82,31 @@ CONFIGS: dict[str, list[PumpSpec]] = {
     "bwd_0p20w": [PumpSpec(PUMP_WAVELENGTH_NM, 0.20, "backward", PUMP_ATTENUATION_DB_PER_KM)],
 }
 
+#: 1 信道探针只需无泵与 0.2 W 前后向，用于隔离 SPM。
+ONE_CHANNEL_CONFIGS = ("nopump", "fwd_0p20w", "bwd_0p20w")
+#: 发射功率扫描（dBm/偏振）：0.5/1/2 mW。
+POWER_SWEEP_DBM_PER_POL = (-3.0103, 0.0, 3.0103)
+POWER_SWEEP_TAG = "3ch_power_sweep"
+
+
+def _sweep_tag(power_dbm_per_pol: float) -> str:
+    """把发射功率 (dBm/偏振) 映射成稳定的数据集标签，如 ``3ch_0p5mw``。"""
+    milliwatt = 10 ** (power_dbm_per_pol / 10)
+    return f"3ch_{milliwatt:.1f}mw".replace(".", "p")
+
 
 def build_wdm_dataset(
     tag: str,
     spec: dict,
     num_symbols: int,
     seed: int,
+    launch_power_dbm_per_pol: float = LAUNCH_POWER_DBM_PER_POL,
 ) -> tuple[Signal, np.ndarray, Constellation]:
     """生成一个 WDM 输入波形、逐通道比特和星座。"""
     rng = np.random.default_rng(seed)
     mapper = Mapper(modulation=MODULATION, power_norm=True, sym_rate=SYMBOL_RATE_HZ)
     rrc = RRCFilter(sps=SPS, roll_off=ROLL_OFF)
-    iq_mod = IQModulator(launch_power_dbm_per_pol=LAUNCH_POWER_DBM_PER_POL)
+    iq_mod = IQModulator(launch_power_dbm_per_pol=launch_power_dbm_per_pol)
     constellation = Constellation(MODULATION, power_norm=True)
 
     bits_per_channel = num_symbols * mapper.bits_per_symbol * mapper.n_pol
@@ -106,7 +125,7 @@ def build_wdm_dataset(
             ChannelSpec(
                 channel_id=idx,
                 freq_offset_hz=float(spec["offsets_hz"][idx]),
-                power_dbm_per_pol=LAUNCH_POWER_DBM_PER_POL,
+                power_dbm_per_pol=launch_power_dbm_per_pol,
             )
             for idx in range(spec["count"])
         ],
@@ -193,7 +212,9 @@ def center_channel_evm(
     )
 
 
-def make_fiber(pumps: list[PumpSpec], *, nonlinear: bool) -> DistributedRamanFiber:
+def make_fiber(
+    pumps: list[PumpSpec], *, nonlinear: bool, pump_model: str = "undepleted"
+) -> DistributedRamanFiber:
     """构造 DRA 光纤；``nonlinear=False`` 时关闭 Kerr 作为线性参考。"""
     return DistributedRamanFiber(
         length_m=FIBER_LENGTH_KM * 1e3,
@@ -204,12 +225,143 @@ def make_fiber(pumps: list[PumpSpec], *, nonlinear: bool) -> DistributedRamanFib
         coarse_step_size_m=COARSE_STEP_M,
         n2_si=N2_SI if nonlinear else 0.0,
         a_eff_um2=A_EFF_UM2,
+        pump_model=pump_model,
         add_ase=False,
     )
 
 
+def _populate_dataset(
+    arrays: dict[str, np.ndarray],
+    metadata: dict,
+    tag: str,
+    spec: dict,
+    num_symbols: int,
+    seed: int,
+    configs: dict[str, list[PumpSpec]],
+    pump_model: str,
+    launch_power_dbm_per_pol: float,
+    purpose: str | None = None,
+) -> None:
+    """生成并记录一个数据集（输入波形 + 各配置的非线性/线性输出）。
+
+    ``purpose`` 为 None 时保持默认数据集的 JSON 结构不变；耗尽数据集会额外
+    写入 ``pump_model`` / ``purpose`` / ``launch_power_dbm_per_pol``。
+    """
+    wdm_input, bits, constellation = build_wdm_dataset(
+        tag, spec, num_symbols, seed, launch_power_dbm_per_pol
+    )
+    arrays[f"input_{tag}"] = wdm_input.data.astype(np.complex64)
+    arrays[f"bits_{tag}"] = bits
+    arrays[f"offsets_{tag}"] = spec["offsets_hz"]
+    center_idx = spec["count"] // 2
+    channel_bandwidth_hz = SYMBOL_RATE_HZ * (1 + ROLL_OFF)
+
+    dataset_meta: dict = {
+        "input_key": f"input_{tag}",
+        "bits_key": f"bits_{tag}",
+        "offsets_key": f"offsets_{tag}",
+        "n_channels": spec["count"],
+        "center_channel_index": center_idx,
+        "sample_rate_hz": float(spec["sample_rate_hz"]),
+        "num_samples": int(wdm_input.data.shape[-1]),
+        "channel_bandwidth_hz": channel_bandwidth_hz,
+        "nli_analysis_bandwidth_hz": NLI_ANALYSIS_BANDWIDTH_HZ,
+        "nli_definition": (
+            "In-band additive NLI after one complex common-gain projection NL-a*LIN; "
+            "50 GHz ideal rectangular analysis band; SNR_NLI=signal/NLI; no ASE."
+        ),
+        "configs": {},
+    }
+    if purpose is not None:
+        dataset_meta["pump_model"] = pump_model
+        dataset_meta["purpose"] = purpose
+        dataset_meta["launch_power_dbm_per_pol"] = launch_power_dbm_per_pol
+
+    no_pump_channel_powers: list[float] | None = None
+    for config_name, pumps in configs.items():
+        nonlinear_output = make_fiber(pumps, nonlinear=True, pump_model=pump_model).forward(wdm_input)
+        linear_output = make_fiber(pumps, nonlinear=False, pump_model=pump_model).forward(wdm_input)
+
+        arrays[f"nl_{tag}_{config_name}"] = nonlinear_output.data.astype(np.complex64)
+        arrays[f"lin_{tag}_{config_name}"] = linear_output.data.astype(np.complex64)
+
+        channel_powers = []
+        nli_powers = []
+        raw_nli_powers = []
+        common_gains_db = []
+        common_phases_deg = []
+        for offset in spec["offsets_hz"]:
+            power, nli_power, raw_nli_power, common_gain_db, common_phase_deg = band_nli_metrics(
+                nonlinear_output.data,
+                linear_output.data,
+                spec["sample_rate_hz"],
+                float(offset),
+                NLI_ANALYSIS_BANDWIDTH_HZ,
+            )
+            channel_powers.append(power)
+            nli_powers.append(nli_power)
+            raw_nli_powers.append(raw_nli_power)
+            common_gains_db.append(common_gain_db)
+            common_phases_deg.append(common_phase_deg)
+        if no_pump_channel_powers is None:
+            no_pump_channel_powers = list(channel_powers)
+
+        per_channel = []
+        for idx, (offset, power, nli_power) in enumerate(
+            zip(spec["offsets_hz"], channel_powers, nli_powers, strict=True)
+        ):
+            snr_nli_db = float(10 * np.log10(power / nli_power)) if nli_power > 0 else None
+            snr_nli_raw_db = (
+                float(10 * np.log10(power / raw_nli_powers[idx])) if raw_nli_powers[idx] > 0 else None
+            )
+            no_pump_power = no_pump_channel_powers[idx]
+            on_off_db = float(10 * np.log10(power / no_pump_power)) if no_pump_power > 0 else None
+            per_channel.append(
+                {
+                    "channel_id": idx,
+                    "freq_offset_hz": float(offset),
+                    "signal_power_w": power,
+                    "nli_power_w": nli_power,
+                    "nli_power_raw_w": raw_nli_powers[idx],
+                    "snr_nli_db": snr_nli_db,
+                    "snr_nli_raw_db": snr_nli_raw_db,
+                    "common_gain_db": common_gains_db[idx],
+                    "common_phase_deg": common_phases_deg[idx],
+                    "on_off_gain_db": on_off_db,
+                }
+            )
+
+        evm_percent, snr_evm_db, evm_common_gain_db, evm_common_phase_deg = center_channel_evm(
+            nonlinear_output, linear_output, center_idx, bits[center_idx], constellation
+        )
+        output_power_per_pol_w = float(np.mean(np.abs(nonlinear_output.data) ** 2))
+        dataset_meta["configs"][config_name] = {
+            "waveform_nonlinear_key": f"nl_{tag}_{config_name}",
+            "waveform_linear_key": f"lin_{tag}_{config_name}",
+            "pumps": [
+                {
+                    "wavelength_nm": pump.wavelength_nm,
+                    "power_w": pump.power_w,
+                    "direction": pump.direction,
+                    "attenuation_db_per_km": pump.attenuation_db_per_km,
+                }
+                for pump in pumps
+            ],
+            "output_power_per_pol_w": output_power_per_pol_w,
+            "dra_ase_model": "none",
+            "dra_ase_power_per_pol_w": 0.0,
+            "center_channel_evm_percent": evm_percent,
+            "center_channel_snr_evm_db": snr_evm_db,
+            "center_channel_common_gain_db": evm_common_gain_db,
+            "center_channel_common_phase_deg": evm_common_phase_deg,
+            "per_channel": per_channel,
+        }
+
+    metadata["datasets"][tag] = dataset_meta
+
+
 def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
-    """生成并保存参考数据集。"""
+    """生成并保存默认（未耗尽）参考数据集。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, np.ndarray] = {}
     metadata: dict = {
@@ -261,114 +413,144 @@ def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
     }
 
     for tag, spec in DATASETS.items():
-        wdm_input, bits, constellation = build_wdm_dataset(tag, spec, num_symbols, seed)
-        arrays[f"input_{tag}"] = wdm_input.data.astype(np.complex64)
-        arrays[f"bits_{tag}"] = bits
-        arrays[f"offsets_{tag}"] = spec["offsets_hz"]
-        center_idx = spec["count"] // 2
-        channel_bandwidth_hz = SYMBOL_RATE_HZ * (1 + ROLL_OFF)
-
-        dataset_meta: dict = {
-            "input_key": f"input_{tag}",
-            "bits_key": f"bits_{tag}",
-            "offsets_key": f"offsets_{tag}",
-            "n_channels": spec["count"],
-            "center_channel_index": center_idx,
-            "sample_rate_hz": float(spec["sample_rate_hz"]),
-            "num_samples": int(wdm_input.data.shape[-1]),
-            "channel_bandwidth_hz": channel_bandwidth_hz,
-            "nli_analysis_bandwidth_hz": NLI_ANALYSIS_BANDWIDTH_HZ,
-            "nli_definition": (
-                "In-band additive NLI after one complex common-gain projection NL-a*LIN; "
-                "50 GHz ideal rectangular analysis band; SNR_NLI=signal/NLI; no ASE."
-            ),
-            "configs": {},
-        }
-
-        no_pump_channel_powers: list[float] | None = None
-        for config_name, pumps in CONFIGS.items():
-            nonlinear_output = make_fiber(pumps, nonlinear=True).forward(wdm_input)
-            linear_output = make_fiber(pumps, nonlinear=False).forward(wdm_input)
-
-            arrays[f"nl_{tag}_{config_name}"] = nonlinear_output.data.astype(np.complex64)
-            arrays[f"lin_{tag}_{config_name}"] = linear_output.data.astype(np.complex64)
-
-            channel_powers = []
-            nli_powers = []
-            raw_nli_powers = []
-            common_gains_db = []
-            common_phases_deg = []
-            for offset in spec["offsets_hz"]:
-                power, nli_power, raw_nli_power, common_gain_db, common_phase_deg = band_nli_metrics(
-                    nonlinear_output.data,
-                    linear_output.data,
-                    spec["sample_rate_hz"],
-                    float(offset),
-                    NLI_ANALYSIS_BANDWIDTH_HZ,
-                )
-                channel_powers.append(power)
-                nli_powers.append(nli_power)
-                raw_nli_powers.append(raw_nli_power)
-                common_gains_db.append(common_gain_db)
-                common_phases_deg.append(common_phase_deg)
-            if no_pump_channel_powers is None:
-                no_pump_channel_powers = list(channel_powers)
-
-            per_channel = []
-            for idx, (offset, power, nli_power) in enumerate(
-                zip(spec["offsets_hz"], channel_powers, nli_powers, strict=True)
-            ):
-                snr_nli_db = float(10 * np.log10(power / nli_power)) if nli_power > 0 else None
-                snr_nli_raw_db = (
-                    float(10 * np.log10(power / raw_nli_powers[idx])) if raw_nli_powers[idx] > 0 else None
-                )
-                no_pump_power = no_pump_channel_powers[idx]
-                on_off_db = float(10 * np.log10(power / no_pump_power)) if no_pump_power > 0 else None
-                per_channel.append(
-                    {
-                        "channel_id": idx,
-                        "freq_offset_hz": float(offset),
-                        "signal_power_w": power,
-                        "nli_power_w": nli_power,
-                        "nli_power_raw_w": raw_nli_powers[idx],
-                        "snr_nli_db": snr_nli_db,
-                        "snr_nli_raw_db": snr_nli_raw_db,
-                        "common_gain_db": common_gains_db[idx],
-                        "common_phase_deg": common_phases_deg[idx],
-                        "on_off_gain_db": on_off_db,
-                    }
-                )
-
-            evm_percent, snr_evm_db, evm_common_gain_db, evm_common_phase_deg = center_channel_evm(
-                nonlinear_output, linear_output, center_idx, bits[center_idx], constellation
-            )
-            output_power_per_pol_w = float(np.mean(np.abs(nonlinear_output.data) ** 2))
-            dataset_meta["configs"][config_name] = {
-                "waveform_nonlinear_key": f"nl_{tag}_{config_name}",
-                "waveform_linear_key": f"lin_{tag}_{config_name}",
-                "pumps": [
-                    {
-                        "wavelength_nm": pump.wavelength_nm,
-                        "power_w": pump.power_w,
-                        "direction": pump.direction,
-                        "attenuation_db_per_km": pump.attenuation_db_per_km,
-                    }
-                    for pump in pumps
-                ],
-                "output_power_per_pol_w": output_power_per_pol_w,
-                "dra_ase_model": "none",
-                "dra_ase_power_per_pol_w": 0.0,
-                "center_channel_evm_percent": evm_percent,
-                "center_channel_snr_evm_db": snr_evm_db,
-                "center_channel_common_gain_db": evm_common_gain_db,
-                "center_channel_common_phase_deg": evm_common_phase_deg,
-                "per_channel": per_channel,
-            }
-
-        metadata["datasets"][tag] = dataset_meta
+        _populate_dataset(
+            arrays,
+            metadata,
+            tag,
+            spec,
+            num_symbols,
+            seed,
+            CONFIGS,
+            "undepleted",
+            LAUNCH_POWER_DBM_PER_POL,
+            None,
+        )
 
     np.savez_compressed(output_dir / "dra_reference.npz", **arrays)
     (output_dir / "dra_reference.json").write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def generate_depleted(output_dir: Path, num_symbols: int, seed: int) -> None:
+    """生成泵浦耗尽数据集：3/5 信道、1 信道 SPM 探针、发射功率扫描。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    arrays: dict[str, np.ndarray] = {}
+    metadata: dict = {
+        "schema_version": 1,
+        "model": {
+            "name": "DistributedRamanFiber",
+            "propagator": "in-house symmetric NumPy SSFM (never PyNLO path)",
+            "pump_model": "depleted coupled signal/pump power ODE",
+            "pump_model_detail": (
+                "Pump powers are state variables integrated with RK4 along z at 25 m steps. "
+                "The signal is represented by its in-band total power (both polarisations) at "
+                "the channel-plan centre frequency. Depleted pump profiles then drive the "
+                "per-frequency Raman gain inside the SSFM. Backward pumps close the boundary "
+                "value problem by fixed-point iteration."
+            ),
+            "raman_spectrum": "Gaussian, peak 13.2 THz, sigma 2.12 THz",
+            "signal_effects": "loss + CD + Kerr retained; channel ISRS not modelled",
+            "ase": "not included in this reference dataset (dra_ase_model='none')",
+        },
+        "fiber": {
+            "length_km": FIBER_LENGTH_KM,
+            "alpha_db_per_km": ALPHA_DB_PER_KM,
+            "beta2_ps2_per_km": BETA2_PS2_PER_KM,
+            "beta3_ps3_per_km": BETA3_PS3_PER_KM,
+            "n2_si": N2_SI,
+            "a_eff_um2": A_EFF_UM2,
+            "coarse_step_m": COARSE_STEP_M,
+        },
+        "signal": {
+            "modulation": MODULATION,
+            "symbol_rate_hz": SYMBOL_RATE_HZ,
+            "sps": SPS,
+            "roll_off": ROLL_OFF,
+            "launch_power_dbm_per_pol": LAUNCH_POWER_DBM_PER_POL,
+            "num_symbols": num_symbols,
+            "seed": seed,
+        },
+        "pump": {
+            "wavelength_nm": PUMP_WAVELENGTH_NM,
+            "attenuation_db_per_km": PUMP_ATTENUATION_DB_PER_KM,
+            "directions": ["forward", "backward"],
+            "powers_w": [0.10, 0.20],
+        },
+        "nli_method": (
+            "Per channel, fit one complex scalar a to NL ≈ a*LIN in the channel band, then take "
+            "the band power of the residual NL-a*LIN as NLI. This removes the common phase/gain "
+            "that a coherent receiver would equalize. nli_power_raw_w (no fit) is also recorded. "
+            "out_linear uses the same pumps/loss/CD but n2=0."
+        ),
+        "notes": [
+            "Same grid and NLI extraction as dra_reference.json; only the pump model differs.",
+            "Pumps are depleted by the signal but have no pump-pump Raman transfer.",
+            "Channel-to-channel ISRS is not modelled (raman_r3=None).",
+            "The 1ch probe isolates SPM; the 3ch power sweep tests NLI ∝ P^3.",
+        ],
+        "datasets": {},
+    }
+
+    for tag in ("3ch", "5ch"):
+        spec = DATASETS[tag]
+        _populate_dataset(
+            arrays,
+            metadata,
+            tag,
+            spec,
+            num_symbols,
+            seed,
+            CONFIGS,
+            "depleted",
+            LAUNCH_POWER_DBM_PER_POL,
+            (
+                f"{spec['count']}-channel depleted-pump counterpart of dra_reference; "
+                "compare on_off_gain_db and snr_nli_db against the undepleted dataset."
+            ),
+        )
+
+    _populate_dataset(
+        arrays,
+        metadata,
+        "1ch",
+        ONE_CHANNEL_DATASET,
+        num_symbols,
+        seed,
+        {name: CONFIGS[name] for name in ONE_CHANNEL_CONFIGS},
+        "depleted",
+        LAUNCH_POWER_DBM_PER_POL,
+        "Single-channel SPM probe: one channel, no XPM, used to separate SPM from XPM under pumping.",
+    )
+
+    for power_dbm in POWER_SWEEP_DBM_PER_POL:
+        tag = _sweep_tag(power_dbm)
+        _populate_dataset(
+            arrays,
+            metadata,
+            tag,
+            DATASETS["3ch"],
+            num_symbols,
+            seed,
+            {"nopump": CONFIGS["nopump"], "fwd_0p20w": CONFIGS["fwd_0p20w"]},
+            "depleted",
+            power_dbm,
+            (
+                "Launch-power sweep at 3ch with a 0.2 W forward pump; "
+                f"launch {10 ** (power_dbm / 10):.2f} mW per pol. Used to fit NLI ∝ P^3."
+            ),
+        )
+
+    metadata["power_sweep"] = {
+        "dataset_tags": [_sweep_tag(power_dbm) for power_dbm in POWER_SWEEP_DBM_PER_POL],
+        "launch_power_mw_per_pol": [float(10 ** (power_dbm / 10)) for power_dbm in POWER_SWEEP_DBM_PER_POL],
+        "config": "fwd_0p20w",
+        "model": "depleted",
+        "purpose": "Fit the log-log slope of nli_power_w vs launch power; GN predicts 3.",
+    }
+
+    np.savez_compressed(output_dir / "dra_reference_depleted.npz", **arrays)
+    (output_dir / "dra_reference_depleted.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
@@ -384,9 +566,26 @@ def main() -> None:
     )
     parser.add_argument("--symbols", type=int, default=256, help="每信道符号数")
     parser.add_argument("--seed", type=int, default=20261104, help="比特/波形生成种子")
+    parser.add_argument(
+        "--depleted",
+        action="store_true",
+        help="同时生成 dra_reference_depleted.{npz,json}（3/5ch、1ch、发射功率扫描）",
+    )
+    parser.add_argument(
+        "--skip-base",
+        action="store_true",
+        help="跳过默认的 dra_reference.{npz,json}（配合 --depleted 使用）",
+    )
     args = parser.parse_args()
-    generate(args.output_dir, args.symbols, args.seed)
-    print(f"Wrote {args.output_dir / 'dra_reference.npz'} and dra_reference.json")
+    if not args.skip_base:
+        generate(args.output_dir, args.symbols, args.seed)
+        print(f"Wrote {args.output_dir / 'dra_reference.npz'} and dra_reference.json")
+    if args.depleted:
+        generate_depleted(args.output_dir, args.symbols, args.seed)
+        print(
+            f"Wrote {args.output_dir / 'dra_reference_depleted.npz'} "
+            "and dra_reference_depleted.json"
+        )
 
 
 if __name__ == "__main__":

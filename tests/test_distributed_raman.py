@@ -6,16 +6,20 @@
 * 泵浦功率单调性、前向/后向剖面差异；
 * 未耗尽开关增益与 lumped ``RamanPump`` 的频率形状一致；
 * 可选 ASE 与 EDFA ASE 分离记录；
-* 已提交的小规模 3/5 信道参考数据集 schema 与 SNR 数据点。
+* 已提交的小规模 3/5 信道参考数据集 schema 与 SNR 数据点；
+* 泵浦耗尽模型：与旧数据逐位兼容、能量/光子账、信道数依赖、
+  后向泵低信号功率极限。
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.constants import c
 
 from physics_nlo_eval.channel import (
     DistributedRamanFiber,
@@ -28,6 +32,7 @@ from physics_nlo_eval.core.signal import Signal, SignalContext
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_DIR = REPO_ROOT / "examples" / "dra_reference"
+GENERATOR_PATH = REPO_ROOT / "examples" / "generate_dra_reference.py"
 
 
 def _signal(
@@ -273,3 +278,166 @@ def test_reference_dataset_schema_and_snr() -> None:
         assert gain_020 > gain_010 > 0.0
         assert np.isclose(gain_010, 5.5, atol=0.2)
         assert np.isclose(gain_020, 11.0, atol=0.3)
+
+
+def _load_generator():
+    """把参考数据生成脚本作为模块加载，复用其波形构造与光纤参数。"""
+    spec = importlib.util.spec_from_file_location("_dra_reference_generator", GENERATOR_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_undepleted_path_matches_committed_waveform_bit_exactly() -> None:
+    """显式 ``pump_model="undepleted"`` 必须逐位复现已提交的参考波形。
+
+    这条测试锁住"新模型不得改动旧数值路径"的约定：波形由固定种子生成、
+    SSFM 完全确定性，因此重算的数组应与 ``dra_reference.npz`` 逐位相等。
+    """
+    metadata = json.loads((REFERENCE_DIR / "dra_reference.json").read_text(encoding="utf-8"))
+    generator = _load_generator()
+    tag = "3ch"
+    dataset = metadata["datasets"][tag]
+    wdm_input, _, _ = generator.build_wdm_dataset(
+        tag,
+        generator.DATASETS[tag],
+        int(metadata["signal"]["num_symbols"]),
+        int(metadata["signal"]["seed"]),
+    )
+
+    output = generator.make_fiber(generator.CONFIGS["fwd_0p20w"], nonlinear=True).forward(wdm_input)
+    assert output.ctx.meta["dra_model"] == "undepleted"
+    with np.load(REFERENCE_DIR / "dra_reference.npz") as arrays:
+        assert np.array_equal(output.data, arrays[f"nl_{tag}_fwd_0p20w"])
+
+
+def test_depleted_energy_and_photon_balance() -> None:
+    """耗尽模型的泵浦能量账必须闭合，且信号增益满足光子数守恒。"""
+    signal = _signal(n_samples=2048, power_w=1e-3)
+    pumps = PumpSpec(1450.0, 0.2, "forward")
+    common = _fiber_kwargs()
+
+    fiber = DistributedRamanFiber(pumps=pumps, pump_model="depleted", **common)
+    output = fiber.forward(signal)
+    balance = output.ctx.meta["dra_pump_energy_balance"]
+    assert output.ctx.meta["dra_model"] == "depleted"
+    assert balance["converged"] is True
+
+    pump = balance["pumps"][0]
+    # 泵浦初值 = 残余 + 光纤损耗 + 转移给信号的功率。
+    transferred = pump["passive_loss_w"] + pump["transferred_to_signal_w"]
+    assert np.isclose(
+        pump["launch_power_w"] - pump["residual_power_w"], transferred, rtol=1e-4
+    )
+
+    # 信号获得的拉曼功率与泵浦转移功率按光子数守恒换算。
+    photon_ratio = signal.ctx.center_freq / (c / (1450.0 * 1e-9))
+    assert np.isclose(
+        balance["signal_raman_gain_w"],
+        pump["transferred_to_signal_w"] * photon_ratio,
+        rtol=1e-9,
+    )
+
+    # 波形侧交叉校验：SSFM 的开关增益必须与耗尽剖面反算的开关增益一致。
+    no_pump = DistributedRamanFiber(pumps=None, **common).forward(signal)
+    measured_db = 10 * np.log10(_output_power_w(output) / _output_power_w(no_pump))
+    modeled_db = 10 * np.log10(fiber.on_off_gain(signal.ctx.center_freq))
+    assert np.isclose(measured_db, modeled_db, atol=0.05)
+
+
+def test_depleted_on_off_gain_falls_with_channel_count() -> None:
+    """前向 0.2 W 下信道数越多，泵浦耗尽越强，开关增益越低。"""
+    common = _fiber_kwargs()
+    gains_db = []
+    for n_channels in (1, 3, 5):
+        fiber = DistributedRamanFiber(
+            pumps=PumpSpec(1450.0, 0.2, "forward"), pump_model="depleted", **common
+        )
+        # 每信道每偏振 1 mW，与参考数据集的 0 dBm/pol 一致。
+        fiber.forward(_signal(power_w=n_channels * 1e-3))
+        gains_db.append(float(10 * np.log10(fiber.on_off_gain(193.1e12))))
+
+    assert gains_db[0] > gains_db[1] > gains_db[2]
+    # 单信道到 5 信道应有零点几 dB 的可见退化，但不应崩塌。
+    assert 0.3 < gains_db[0] - gains_db[2] < 2.0
+
+
+def test_depleted_backward_pump_matches_undepleted_at_low_power() -> None:
+    """信号功率极低时，后向泵耗尽模型的开关增益退化为未耗尽结果。"""
+    common = _fiber_kwargs()
+    pumps = PumpSpec(1450.0, 0.2, "backward")
+
+    depleted = DistributedRamanFiber(pumps=pumps, pump_model="depleted", **common)
+    depleted.forward(_signal(power_w=1e-7))
+    undepleted = DistributedRamanFiber(pumps=pumps, pump_model="undepleted", **common)
+
+    depleted_db = 10 * np.log10(depleted.on_off_gain(193.1e12))
+    undepleted_db = 10 * np.log10(undepleted.on_off_gain(193.1e12))
+    assert np.isclose(depleted_db, undepleted_db, atol=1e-3)
+    # 后向泵在低信号功率下应已收敛到不动点。
+    assert depleted._depletion_diagnostics is not None
+    assert depleted._depletion_diagnostics["converged"] is True
+
+
+def test_depleted_profile_requires_forward() -> None:
+    """耗尽剖面依赖信号，``forward()`` 之前调用必须显式报错。"""
+    fiber = DistributedRamanFiber(
+        pumps=PumpSpec(1450.0, 0.2, "forward"), pump_model="depleted", **_fiber_kwargs()
+    )
+    with pytest.raises(RuntimeError, match="forward"):
+        fiber.pump_power_w(0.0)
+    with pytest.raises(RuntimeError, match="forward"):
+        fiber.on_off_gain(193.1e12)
+
+
+def test_depleted_reference_dataset_schema() -> None:
+    """耗尽参考数据集应可读，并体现泵浦耗尽导致的增益退化。"""
+    json_path = REFERENCE_DIR / "dra_reference_depleted.json"
+    npz_path = REFERENCE_DIR / "dra_reference_depleted.npz"
+    assert json_path.exists(), f"missing depleted metadata: {json_path}"
+    assert npz_path.exists(), f"missing depleted waveforms: {npz_path}"
+
+    metadata = json.loads(json_path.read_text(encoding="utf-8"))
+    assert metadata["model"]["pump_model"].startswith("depleted")
+    assert set(metadata["datasets"]) == {
+        "3ch",
+        "5ch",
+        "1ch",
+        "3ch_0p5mw",
+        "3ch_1p0mw",
+        "3ch_2p0mw",
+    }
+
+    with np.load(npz_path) as arrays:
+        for dataset in metadata["datasets"].values():
+            assert dataset["pump_model"] == "depleted"
+            assert arrays[dataset["input_key"]].shape[1] == dataset["num_samples"]
+            for config in dataset["configs"].values():
+                nl = arrays[config["waveform_nonlinear_key"]]
+                lin = arrays[config["waveform_linear_key"]]
+                assert np.all(np.isfinite(nl)) and np.all(np.isfinite(lin))
+                assert len(config["per_channel"]) == dataset["n_channels"]
+
+    three_channel = metadata["datasets"]["3ch"]
+    five_channel = metadata["datasets"]["5ch"]
+    # 信道数越多，前向泵的开关增益越低（泵浦耗尽）。
+    gain_3ch = three_channel["configs"]["fwd_0p20w"]["per_channel"][1]["on_off_gain_db"]
+    gain_5ch = five_channel["configs"]["fwd_0p20w"]["per_channel"][2]["on_off_gain_db"]
+    assert 0.0 < gain_5ch < gain_3ch < 11.0
+
+    # 1ch 探针：前向放大显著恶化 NLI，后向几乎不变。
+    one_channel = metadata["datasets"]["1ch"]["configs"]
+    snr_nopump = one_channel["nopump"]["per_channel"][0]["snr_nli_db"]
+    snr_forward = one_channel["fwd_0p20w"]["per_channel"][0]["snr_nli_db"]
+    snr_backward = one_channel["bwd_0p20w"]["per_channel"][0]["snr_nli_db"]
+    assert snr_nopump - snr_forward > 13.0
+    assert snr_nopump - snr_backward < 1.0
+
+    # 3ch 前向 0.2 W 在 0.5/1/2 mW 下 NLI 单调增加。
+    nli_by_power = [
+        metadata["datasets"][tag]["configs"]["fwd_0p20w"]["per_channel"][1]["nli_power_w"]
+        for tag in metadata["power_sweep"]["dataset_tags"]
+    ]
+    assert nli_by_power[0] < nli_by_power[1] < nli_by_power[2]
+
