@@ -1,0 +1,48 @@
+{
+  "generated_by": "examples/check_dra_wideband_analytic.py (read-only call to network-nlo-eval)",
+  "network_repo": "/home/zsig/Documents/gits/wt/mm-integrate",
+  "plans": {
+    "c57": {
+      "plan": "c57",
+      "n_channels": 57,
+      "waveform_snr_nli_db": 34.587854559732705,
+      "waveform_nli_w": 1.6337596478831097e-08,
+      "coarse_step_m": 0.48828125,
+      "step_converged": true,
+      "analytic": {
+        "model": "hybrid_raman_paper",
+        "config": "nopump",
+        "pump_depletion": true,
+        "channel_bandwidth_source": "symbol_rate",
+        "center_channel_index": 28,
+        "signal_power_w": 0.001,
+        "nli_power_w": 4.860691206831446e-07,
+        "snr_nli_db": 33.13301968192869
+      },
+      "residual_db": -1.4548348778040179,
+      "residual_definition": "analytic_snr_nli_db - waveform_snr_nli_db; positive means analytic is more optimistic",
+      "note": "Analytic side uses the same flat alpha=0.162 dB/km, beta2 and beta3-derived dispersion slope, n2 and A_eff as the waveform; only the nopump case is compared."
+    },
+    "cl152": {
+      "plan": "cl152",
+      "n_channels": 152,
+      "waveform_snr_nli_db": 32.47303966002248,
+      "waveform_nli_w": 2.687093943115032e-08,
+      "coarse_step_m": 0.244140625,
+      "step_converged": false,
+      "analytic": {
+        "model": "hybrid_raman_paper",
+        "config": "nopump",
+        "pump_depletion": true,
+        "channel_bandwidth_source": "symbol_rate",
+        "center_channel_index": 76,
+        "signal_power_w": 0.001,
+        "nli_power_w": 5.291072913542905e-07,
+        "snr_nli_db": 32.76456253638771
+      },
+      "residual_db": 0.291522876365228,
+      "residual_definition": "analytic_snr_nli_db - waveform_snr_nli_db; positive means analytic is more optimistic",
+      "note": "Analytic side uses the same flat alpha=0.162 dB/km, beta2 and beta3-derived dispersion slope, n2 and A_eff as the waveform; only the nopump case is compared."
+    }
+  }
+}

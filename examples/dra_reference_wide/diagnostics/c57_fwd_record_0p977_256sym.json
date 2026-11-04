@@ -1,0 +1,17 @@
+{
+  "center_channel_index": 28,
+  "center_freq_offset_hz": 0.0,
+  "signal_power_w": 9.797031098024732e-05,
+  "nli_power_w": 9.506762482941068e-07,
+  "nli_power_raw_w": 0.00038356893194349366,
+  "snr_nli_db": 20.13061842974045,
+  "common_gain_db": -0.041142902722282874,
+  "common_phase_deg": -164.26590784851902,
+  "plan": "c57",
+  "num_symbols": 256,
+  "sample_rate_factor": 1,
+  "step_m": 0.9765625,
+  "config": "fwd_0p20w",
+  "elapsed_s": 316.19467651983723,
+  "num_samples": 18432
+}

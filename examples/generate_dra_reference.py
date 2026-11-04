@@ -21,12 +21,27 @@
 ``dra_reference_depleted.{npz,json}``：3/5 信道耗尽参考、1 信道 SPM 探针，
 以及 3 信道前向泵的发射功率扫描。数据集刻意保持小规模：3/5 信道、
 50 GBd DP-QPSK、100 km 单跨，便于完整复现和逐位核对。
-"""
 
-from __future__ import annotations
+全 WDM（c57/cl152、75 GHz、64 GBd）::
+
+    # 只跑步长探针，写 step_convergence.json
+    python examples/generate_dra_reference.py --wideband --wideband-probe-only
+
+    # 复用探针并生成主数据（每个计划单独跑，避免超过命令超时）
+    python examples/generate_dra_reference.py --wideband --reuse-probe \
+        --wideband-plans c57 --wideband-step-map c57=0.48828125
+    python examples/generate_dra_reference.py --wideband --reuse-probe \
+        --wideband-plans cl152 --wideband-symbols-map cl152=128 \
+        --wideband-step-map cl152=0.48828125
+
+全 WDM 的步长收敛远比 3/5/7ch 苛刻（见 ``docs/dra-waveform.md`` §12）；
+默认的历史 500 m 路径保持不变。
+"""
 
 import argparse
 import json
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -102,6 +117,241 @@ HISTORICAL_STEP_M = 500.0
 STEP_CONVERGENCE_TOL_DB = 0.01
 #: 走离经验判据：每步的群速度走离应 ≲0.15 symbol。
 WALK_OFF_TARGET_SYMBOLS = 0.15
+
+# ---------------------------------------------------------------------------
+# 全 WDM 参考（c57 / cl152）：75 GHz 栅格、64 GBd、C 或 C+L
+# ---------------------------------------------------------------------------
+
+#: 与 network-nlo-eval 的 ``SMF_100KM`` 近似对齐的光纤参数。
+WIDEBAND_FIBER_LENGTH_KM = 100.0
+#: 1550 nm 处的多项式衰减值。第一版对所有信道用平坦近似；C+L 边缘的
+#: 实际值约为 0.162–0.178 dB/km，差异在文档中列为已知限制。
+WIDEBAND_ALPHA_DB_PER_KM = 0.162
+#: D=17 ps/nm/km @1550 nm 对应的 beta2。
+WIDEBAND_BETA2_PS2_PER_KM = -21.7
+#: 在 64 GBd 信道内 beta3 可忽略（与历史数据同为 1e-4 ps^3/km 量级）。
+WIDEBAND_BETA3_PS3_PER_KM = 1e-4
+WIDEBAND_N2_SI = 2.6e-20
+WIDEBAND_A_EFF_UM2 = 80.0
+WIDEBAND_PUMP_ATTENUATION_DB_PER_KM = 0.25
+
+WIDEBAND_NUM_SYMBOLS = 256
+WIDEBAND_SEED = 20261104
+WIDEBAND_SECOND_SEED = 20261105
+#: 步长探针只需短记录；64 symbols 足以稳定中心信道 NLI 的步长趋势。
+WIDEBAND_PROBE_NUM_SYMBOLS = 64
+#: 从历史 500 m 一路加密到 0.98 m；全 WDM 的 NLI 在可负担步长内仍未收敛，
+#: 探针会继续自动减半到 ``WIDEBAND_MIN_PROBE_STEP_M``。
+WIDEBAND_PROBE_STEPS_M = (
+    500.0,
+    250.0,
+    125.0,
+    62.5,
+    31.25,
+    15.625,
+    7.8125,
+    3.90625,
+    1.953125,
+    0.9765625,
+)
+#: 自动加密的最小步长；再小则单次传播超过可接受时间，明确记录未收敛。
+WIDEBAND_MIN_PROBE_STEP_M = 0.48828125
+
+#: 六泵后向配置（C+L）。功率为单泵入纤功率 (W)。
+SIX_PUMP_WAVELENGTHS_NM = (1340.0, 1360.0, 1427.0, 1445.0, 1476.0, 1505.0)
+SIX_PUMP_POWERS_W = (0.63, 0.63, 0.165, 0.131, 0.125, 0.075)
+
+
+@dataclass(frozen=True)
+class WidebandPlan:
+    """一个全 WDM 参考数据集的频率与波形规划。
+
+    该类型刻意不按算例名分支：``c57`` / ``cl152`` 只是两个实例。采样率
+    必须是单信道采样率（``symbol_rate_hz * sps``）的整数倍，这样
+    :class:`WDMMux` 的 ``resample_poly`` 比值才是整数，避免重采样伪影。
+
+    Parameters
+    ----------
+    name : str
+        数据集标签（同时用作数组键前缀）。
+    n_channels : int
+        信道数。
+    channel_spacing_hz : float
+        信道间隔 (Hz)。
+    center_frequency_hz : float
+        WDM 复用信号的绝对中心频率 (Hz)。
+    symbol_rate_hz : float
+        单信道符号率 (Hz)。
+    roll_off : float
+        RRC 滚降系数。
+    sps : int
+        每符号采样数（单信道基带）。
+    sample_rate_hz : float
+        合波后的采样率 (Hz)。
+    launch_power_dbm_per_pol : float, optional
+        每信道每偏振入纤功率 (dBm)。默认 0 dBm。
+    num_symbols : int, optional
+        每信道符号数。
+    """
+
+    name: str
+    n_channels: int
+    channel_spacing_hz: float
+    center_frequency_hz: float
+    symbol_rate_hz: float
+    roll_off: float
+    sps: int
+    sample_rate_hz: float
+    launch_power_dbm_per_pol: float = 0.0
+    num_symbols: int = WIDEBAND_NUM_SYMBOLS
+
+    def __post_init__(self) -> None:
+        """校验栅格覆盖、信道不重叠，以及整数重采样比。"""
+        if not self.name:
+            raise ValueError("plan name must be non-empty.")
+        if self.n_channels < 1:
+            raise ValueError("n_channels must be positive.")
+        if self.channel_spacing_hz <= 0 or self.center_frequency_hz <= 0:
+            raise ValueError("channel spacing and center frequency must be positive.")
+        if self.symbol_rate_hz <= 0 or self.sps < 1:
+            raise ValueError("symbol rate and sps must be positive.")
+        if not 0.0 <= self.roll_off < 1.0:
+            raise ValueError("roll_off must be in [0, 1).")
+        if self.num_symbols < 1:
+            raise ValueError("num_symbols must be positive.")
+
+        occupied = self.symbol_rate_hz * (1.0 + self.roll_off)
+        if self.channel_spacing_hz < occupied:
+            raise ValueError(
+                f"{self.name}: channel spacing {self.channel_spacing_hz:.6g} Hz is smaller than "
+                f"the occupied bandwidth {occupied:.6g} Hz; channels overlap."
+            )
+        span = (self.n_channels - 1) * self.channel_spacing_hz + occupied
+        if self.sample_rate_hz < span:
+            raise ValueError(
+                f"{self.name}: sample rate {self.sample_rate_hz:.6g} Hz is smaller than the "
+                f"muxed span {span:.6g} Hz; the WDM signal would alias."
+            )
+
+        channel_rate = self.symbol_rate_hz * self.sps
+        ratio = self.sample_rate_hz / channel_rate
+        if not np.isclose(ratio, round(ratio), rtol=1e-9, atol=0.0):
+            raise ValueError(
+                f"{self.name}: sample rate must be an integer multiple of the channel "
+                f"sample rate ({channel_rate:.6g} Hz); got ratio {ratio:.6g}."
+            )
+
+    @property
+    def offsets_hz(self) -> np.ndarray:
+        """各信道相对 ``center_frequency_hz`` 的频偏 (Hz)。"""
+        return (np.arange(self.n_channels) - (self.n_channels - 1) / 2.0) * self.channel_spacing_hz
+
+    @property
+    def occupied_bandwidth_hz(self) -> float:
+        """单信道占用带宽 ``Rs * (1 + roll_off)`` (Hz)。"""
+        return self.symbol_rate_hz * (1.0 + self.roll_off)
+
+    @property
+    def channel_sample_rate_hz(self) -> float:
+        """单信道基带采样率 (Hz)。"""
+        return self.symbol_rate_hz * self.sps
+
+    @property
+    def resample_ratio(self) -> int:
+        """``WDMMux`` 的整数上采样比（目标采样率 / 单信道采样率）。"""
+        return int(round(self.sample_rate_hz / self.channel_sample_rate_hz))
+
+    @property
+    def samples_per_channel(self) -> int:
+        """单信道成形后的样本数。"""
+        return self.num_symbols * self.sps
+
+    def with_num_symbols(self, num_symbols: int) -> "WidebandPlan":
+        """返回同参数、不同符号数的副本。"""
+        return replace(self, num_symbols=num_symbols)
+
+    def to_metadata(self) -> dict:
+        """可 JSON 序列化的计划描述。"""
+        offsets = self.offsets_hz
+        return {
+            "name": self.name,
+            "n_channels": self.n_channels,
+            "channel_spacing_hz": self.channel_spacing_hz,
+            "center_frequency_hz": self.center_frequency_hz,
+            "symbol_rate_hz": self.symbol_rate_hz,
+            "roll_off": self.roll_off,
+            "sps": self.sps,
+            "sample_rate_hz": self.sample_rate_hz,
+            "channel_sample_rate_hz": self.channel_sample_rate_hz,
+            "resample_ratio": self.resample_ratio,
+            "launch_power_dbm_per_pol": self.launch_power_dbm_per_pol,
+            "num_symbols": self.num_symbols,
+            "samples_per_channel": self.samples_per_channel,
+            "occupied_bandwidth_hz": self.occupied_bandwidth_hz,
+            "first_channel_offset_hz": float(offsets[0]),
+            "last_channel_offset_hz": float(offsets[-1]),
+        }
+
+
+#: 全 WDM 计划。中心频率与 network-nlo-eval 的 ``c_57ch`` / ``cl_152ch``
+#: 网格中心一致；采样率是 64 GBd × 4 sps 的 18 / 45 倍。
+WIDEBAND_PLANS: dict[str, WidebandPlan] = {
+    "c57": WidebandPlan(
+        name="c57",
+        n_channels=57,
+        channel_spacing_hz=75e9,
+        center_frequency_hz=193.75e12,
+        symbol_rate_hz=64e9,
+        roll_off=0.1,
+        sps=SPS,
+        sample_rate_hz=4.608e12,
+        launch_power_dbm_per_pol=LAUNCH_POWER_DBM_PER_POL,
+        num_symbols=WIDEBAND_NUM_SYMBOLS,
+    ),
+    "cl152": WidebandPlan(
+        name="cl152",
+        n_channels=152,
+        channel_spacing_hz=75e9,
+        center_frequency_hz=190.15e12,
+        symbol_rate_hz=64e9,
+        roll_off=0.1,
+        sps=SPS,
+        sample_rate_hz=11.52e12,
+        launch_power_dbm_per_pol=LAUNCH_POWER_DBM_PER_POL,
+        num_symbols=WIDEBAND_NUM_SYMBOLS,
+    ),
+}
+
+
+def _single_pump(power_w: float, direction: str) -> PumpSpec:
+    """1450 nm 单泵，参数与历史 3/5/7ch 数据一致。"""
+    return PumpSpec(
+        PUMP_WAVELENGTH_NM,
+        power_w,
+        direction,
+        WIDEBAND_PUMP_ATTENUATION_DB_PER_KM,
+    )
+
+
+#: 全 WDM 的泵浦配置。``c57`` 与历史数据同口径；``cl152`` 用六泵后向。
+WIDEBAND_CONFIGS: dict[str, dict[str, list[PumpSpec]]] = {
+    "c57": {
+        "nopump": [],
+        "fwd_0p20w": [_single_pump(0.20, "forward")],
+        "bwd_0p20w": [_single_pump(0.20, "backward")],
+    },
+    "cl152": {
+        "nopump": [],
+        "bwd_sixpumps": [
+            PumpSpec(wavelength_nm, power_w, "backward", WIDEBAND_PUMP_ATTENUATION_DB_PER_KM)
+            for wavelength_nm, power_w in zip(
+                SIX_PUMP_WAVELENGTHS_NM, SIX_PUMP_POWERS_W, strict=True
+            )
+        ],
+        # 可选趋势对照：与 c57 的前向单泵同功率。
+        "fwd_0p20w": [_single_pump(0.20, "forward")],
+    },
+}
 
 
 def _sweep_tag(power_dbm_per_pol: float) -> str:
@@ -338,6 +588,512 @@ def step_convergence_metadata(
         "recommended_step_m_for_target": recommended_step_m(max_offset),
         "metric": "nopump center-channel snr_nli_db",
     }
+
+
+def build_wideband_dataset(
+    plan: WidebandPlan,
+    seed: int,
+) -> tuple[Signal, np.ndarray, Constellation]:
+    """生成一个全 WDM 输入波形、逐信道比特和星座。
+
+    与历史 :func:`build_wdm_dataset` 的唯一区别是全部参数来自
+    :class:`WidebandPlan`，不使用模块级的 50 GBd / 100 GHz 常量。
+    """
+    rng = np.random.default_rng(seed)
+    mapper = Mapper(modulation=MODULATION, power_norm=True, sym_rate=plan.symbol_rate_hz)
+    rrc = RRCFilter(sps=plan.sps, roll_off=plan.roll_off)
+    iq_mod = IQModulator(launch_power_dbm_per_pol=plan.launch_power_dbm_per_pol)
+    constellation = Constellation(MODULATION, power_norm=True)
+
+    bits_per_channel = plan.num_symbols * mapper.bits_per_symbol * mapper.n_pol
+    bits = rng.integers(
+        0, 2, size=(plan.n_channels, bits_per_channel), dtype=np.int8
+    ).astype(bool)
+
+    channel_signals = []
+    for idx in range(plan.n_channels):
+        symbols = mapper.forward(bits[idx])
+        shaped = rrc.forward(symbols)
+        channel_signals.append(iq_mod.forward(shaped))
+
+    wdm_plan = WDMPlan(
+        reference_freq_hz=plan.center_frequency_hz,
+        channels=[
+            ChannelSpec(
+                channel_id=idx,
+                freq_offset_hz=float(plan.offsets_hz[idx]),
+                power_dbm_per_pol=plan.launch_power_dbm_per_pol,
+            )
+            for idx in range(plan.n_channels)
+        ],
+    )
+    mux = WDMMux(wdm_plan, target_sample_rate_hz=plan.sample_rate_hz)
+    wdm_input = mux.combine(channel_signals)
+    wdm_input.ctx.meta["dra_reference_tag"] = plan.name
+    return wdm_input, bits, constellation
+
+
+def make_wideband_fiber(
+    pumps: list[PumpSpec],
+    *,
+    nonlinear: bool,
+    pump_model: str = "depleted",
+    coarse_step_m: float,
+) -> DistributedRamanFiber:
+    """构造全 WDM 参考用的 DRA 光纤（平坦 alpha，1550 nm beta2）。"""
+    return DistributedRamanFiber(
+        length_m=WIDEBAND_FIBER_LENGTH_KM * 1e3,
+        alpha_db_per_km=WIDEBAND_ALPHA_DB_PER_KM,
+        beta2_ps2_per_km=WIDEBAND_BETA2_PS2_PER_KM,
+        beta3_ps3_per_km=WIDEBAND_BETA3_PS3_PER_KM,
+        pumps=pumps,
+        coarse_step_size_m=coarse_step_m,
+        n2_si=WIDEBAND_N2_SI if nonlinear else 0.0,
+        a_eff_um2=WIDEBAND_A_EFF_UM2,
+        pump_model=pump_model,
+        add_ase=False,
+    )
+
+
+def wideband_walkoff_per_step_symbols(plan: WidebandPlan, step_m: float) -> float:
+    """每一步 SSFM 的群速度走离（symbol）。
+
+    ``Δτ = 2π · Δf_max · |β2| · dz``，再除以符号周期 ``1/Rs``；``Δf_max``
+    取最外信道相对中心的频偏。
+    """
+    max_offset_hz = float(np.max(np.abs(plan.offsets_hz)))
+    beta2_s2_per_m = abs(WIDEBAND_BETA2_PS2_PER_KM) * 1e-24 / 1e3
+    return float(2 * np.pi * max_offset_hz * beta2_s2_per_m * step_m * plan.symbol_rate_hz)
+
+
+def wideband_recommended_step_m(plan: WidebandPlan) -> float | None:
+    """按每步走离 0.15 symbol 折算的建议步长 (m)。"""
+    walkoff = wideband_walkoff_per_step_symbols(plan, 1.0)
+    return float(WALK_OFF_TARGET_SYMBOLS / walkoff) if walkoff > 0 else None
+
+
+def wideband_center_channel_metrics(
+    plan: WidebandPlan,
+    wdm_input: Signal,
+    step_m: float,
+    pumps: list[PumpSpec],
+    pump_model: str = "depleted",
+) -> dict:
+    """在给定步长下传播，返回中心信道的功率/NLI/SNR。"""
+    nonlinear = make_wideband_fiber(
+        pumps, nonlinear=True, pump_model=pump_model, coarse_step_m=step_m
+    ).forward(wdm_input)
+    linear = make_wideband_fiber(
+        pumps, nonlinear=False, pump_model=pump_model, coarse_step_m=step_m
+    ).forward(wdm_input)
+    center_idx = plan.n_channels // 2
+    power, nli_power, raw_nli_power, common_gain_db, common_phase_deg = band_nli_metrics(
+        nonlinear.data,
+        linear.data,
+        plan.sample_rate_hz,
+        float(plan.offsets_hz[center_idx]),
+        plan.symbol_rate_hz,
+    )
+    snr_nli_db = float(10 * np.log10(power / nli_power)) if nli_power > 0 else None
+    return {
+        "center_channel_index": center_idx,
+        "center_freq_offset_hz": float(plan.offsets_hz[center_idx]),
+        "signal_power_w": power,
+        "nli_power_w": nli_power,
+        "nli_power_raw_w": raw_nli_power,
+        "snr_nli_db": snr_nli_db,
+        "common_gain_db": common_gain_db,
+        "common_phase_deg": common_phase_deg,
+    }
+
+
+def wideband_step_convergence(
+    plan: WidebandPlan,
+    steps_m: tuple[float, ...] = WIDEBAND_PROBE_STEPS_M,
+    *,
+    num_symbols: int = WIDEBAND_PROBE_NUM_SYMBOLS,
+    seed: int = WIDEBAND_SEED,
+    pump_model: str = "depleted",
+    tolerance_db: float = STEP_CONVERGENCE_TOL_DB,
+    extend: bool = True,
+) -> dict:
+    """用短记录测无泵中心信道的步长收敛性。
+
+    从 ``steps_m`` 开始，逐档减半重复最后一步，直到相邻两档的 SNR 增量
+    ``< tolerance_db`` 或触及 ``WIDEBAND_MIN_PROBE_STEP_M``。返回值记录
+    每档的 SNR、走离和耗时；未收敛时 ``converged_step_m`` 为 ``None``。
+    """
+    steps = [float(step) for step in steps_m]
+    if not steps:
+        raise ValueError("steps_m must not be empty.")
+    if any(step <= 0 for step in steps):
+        raise ValueError("step sizes must be positive.")
+
+    probe_plan = plan.with_num_symbols(num_symbols)
+    probe_input, _, _ = build_wideband_dataset(probe_plan, seed)
+    pumps = WIDEBAND_CONFIGS.get(plan.name, {}).get("nopump", [])
+
+    def evaluate(step_m: float) -> dict:
+        started = time.perf_counter()
+        metrics = wideband_center_channel_metrics(
+            probe_plan, probe_input, step_m, pumps, pump_model
+        )
+        elapsed = time.perf_counter() - started
+        return {
+            "step_m": float(step_m),
+            "n_steps": int(np.ceil(WIDEBAND_FIBER_LENGTH_KM * 1e3 / step_m)),
+            "walkoff_per_step_symbols": wideband_walkoff_per_step_symbols(probe_plan, step_m),
+            "elapsed_s": float(elapsed),
+            **metrics,
+        }
+
+    rows = [evaluate(step) for step in steps]
+    max_extensions = 2
+    while extend and len(rows) >= 2:
+        increment = rows[-1]["snr_nli_db"] - rows[-2]["snr_nli_db"]
+        if abs(increment) < tolerance_db:
+            break
+        next_step = rows[-1]["step_m"] / 2.0
+        if next_step < WIDEBAND_MIN_PROBE_STEP_M or len(rows) >= len(steps) + max_extensions:
+            break
+        rows.append(evaluate(next_step))
+
+    last_increment = (
+        float(rows[-1]["snr_nli_db"] - rows[-2]["snr_nli_db"]) if len(rows) >= 2 else float("nan")
+    )
+    step_converged = bool(abs(last_increment) < tolerance_db)
+    snr_500 = next((row["snr_nli_db"] for row in rows if row["step_m"] == HISTORICAL_STEP_M), None)
+    if snr_500 is None:
+        snr_500 = evaluate(HISTORICAL_STEP_M)["snr_nli_db"]
+    max_offset = float(np.max(np.abs(plan.offsets_hz)))
+
+    return {
+        "plan": plan.to_metadata(),
+        "probe_num_symbols": int(num_symbols),
+        "probe_seed": int(seed),
+        "pump_model": pump_model,
+        "config": "nopump",
+        "num_samples": int(probe_input.data.shape[-1]),
+        "steps": rows,
+        "last_increment_db": last_increment,
+        "tolerance_db": float(tolerance_db),
+        "step_converged": step_converged,
+        "converged_step_m": float(rows[-1]["step_m"]) if step_converged else None,
+        "step_artifact_500m_db": float(snr_500 - rows[-1]["snr_nli_db"]),
+        "max_offset_from_center_hz": max_offset,
+        "walkoff_per_step_symbols": wideband_walkoff_per_step_symbols(
+            plan, rows[-1]["step_m"]
+        ),
+        "walkoff_target_symbols": WALK_OFF_TARGET_SYMBOLS,
+        "walkoff_formula": "2*pi*delta_f_max*abs(beta2)*dz*symbol_rate",
+        "recommended_step_m_for_target": wideband_recommended_step_m(plan),
+        "metric": "nopump center-channel snr_nli_db",
+        "elapsed_s": float(sum(row["elapsed_s"] for row in rows)),
+    }
+
+
+def _wideband_pump_metadata(plan: WidebandPlan) -> dict:
+    """把该计划的泵浦配置整理成可序列化字典。"""
+    return {
+        "attenuation_db_per_km": WIDEBAND_PUMP_ATTENUATION_DB_PER_KM,
+        "configs": {
+            config_name: [
+                {
+                    "wavelength_nm": pump.wavelength_nm,
+                    "power_w": pump.power_w,
+                    "direction": pump.direction,
+                    "attenuation_db_per_km": pump.attenuation_db_per_km,
+                }
+                for pump in pumps
+            ]
+            for config_name, pumps in WIDEBAND_CONFIGS[plan.name].items()
+        },
+    }
+
+
+def _wideband_notes(plan: WidebandPlan, seed: int) -> list[str]:
+    """全 WDM 数据集的限制与口径说明。"""
+    return [
+        "NLI analysis band is the symbol rate (64 GHz), not the 70.4 GHz occupied bandwidth.",
+        "Fibre alpha is flat at the 1550 nm polynomial value (0.162 dB/km); the SMF_100KM "
+        "polynomial gives ~0.162-0.178 dB/km across C+L, so L-band edge loss is underestimated.",
+        "beta2 is flat -21.7 ps^2/km at 1550 nm; beta3=1e-4 ps^3/km is negligible over 64 GBd.",
+        "Depleted pump model uses the in-band total power at the plan centre frequency; it does "
+        "not model pump-pump Raman transfer or pump ASE.",
+        "Channel-to-channel ISRS is not modelled (raman_r3=None).",
+        f"Each waveform is one {seed} realisation; statistical uncertainty is documented in "
+        "docs/dra-waveform.md and needs a second seed for a formal estimate.",
+        "step_artifact_500m_db = SNR(500 m) - SNR(generation step); negative means 500 m "
+        "overestimates NLI.",
+    ]
+
+
+def generate_wideband_plan(
+    plan: WidebandPlan,
+    output_dir: Path,
+    *,
+    seed: int,
+    step_m: float,
+    probe: dict,
+    pump_model: str = "depleted",
+    file_stem: str | None = None,
+    check_undepleted: bool = True,
+) -> dict:
+    """生成并保存一个全 WDM 计划的数据集，返回其元数据。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    wdm_input, bits, _ = build_wideband_dataset(plan, seed)
+    tag = plan.name
+    arrays: dict[str, np.ndarray] = {
+        f"input_{tag}": wdm_input.data.astype(np.complex64),
+        f"bits_{tag}": bits,
+        f"offsets_{tag}": plan.offsets_hz,
+    }
+
+    configs = WIDEBAND_CONFIGS[plan.name]
+    raw_metrics: dict[str, list[dict]] = {}
+    nonlinear_outputs: dict[str, np.ndarray] = {}
+    output_powers: dict[str, float] = {}
+    for config_name, pumps in configs.items():
+        nonlinear = make_wideband_fiber(
+            pumps, nonlinear=True, pump_model=pump_model, coarse_step_m=step_m
+        ).forward(wdm_input)
+        linear = make_wideband_fiber(
+            pumps, nonlinear=False, pump_model=pump_model, coarse_step_m=step_m
+        ).forward(wdm_input)
+        arrays[f"nl_{tag}_{config_name}"] = nonlinear.data.astype(np.complex64)
+        arrays[f"lin_{tag}_{config_name}"] = linear.data.astype(np.complex64)
+        nonlinear_outputs[config_name] = nonlinear.data
+        output_powers[config_name] = float(np.mean(np.abs(nonlinear.data) ** 2))
+        raw_metrics[config_name] = [
+            {
+                "channel_id": idx,
+                "freq_offset_hz": float(offset),
+                "signal_power_w": power,
+                "nli_power_w": nli_power,
+                "nli_power_raw_w": raw_nli_power,
+                "snr_nli_db": (
+                    float(10 * np.log10(power / nli_power)) if nli_power > 0 else None
+                ),
+                "snr_nli_raw_db": (
+                    float(10 * np.log10(power / raw_nli_power)) if raw_nli_power > 0 else None
+                ),
+                "common_gain_db": gain_db,
+                "common_phase_deg": phase_deg,
+            }
+            for idx, offset in enumerate(plan.offsets_hz)
+            for power, nli_power, raw_nli_power, gain_db, phase_deg in [
+                band_nli_metrics(
+                    nonlinear.data,
+                    linear.data,
+                    plan.sample_rate_hz,
+                    float(offset),
+                    plan.symbol_rate_hz,
+                )
+            ]
+        ]
+
+    nopump_powers = [row["signal_power_w"] for row in raw_metrics["nopump"]]
+    config_documents: dict[str, dict] = {}
+    for config_name, rows in raw_metrics.items():
+        per_channel = []
+        for row in rows:
+            reference_power = nopump_powers[row["channel_id"]]
+            per_channel.append(
+                {
+                    **row,
+                    "on_off_gain_db": (
+                        float(10 * np.log10(row["signal_power_w"] / reference_power))
+                        if reference_power > 0
+                        else None
+                    ),
+                }
+            )
+        config_documents[config_name] = {
+            "waveform_nonlinear_key": f"nl_{tag}_{config_name}",
+            "waveform_linear_key": f"lin_{tag}_{config_name}",
+            "pumps": [
+                {
+                    "wavelength_nm": pump.wavelength_nm,
+                    "power_w": pump.power_w,
+                    "direction": pump.direction,
+                    "attenuation_db_per_km": pump.attenuation_db_per_km,
+                }
+                for pump in configs[config_name]
+            ],
+            "output_power_per_pol_w": output_powers[config_name],
+            "dra_ase_model": "none",
+            "dra_ase_power_per_pol_w": 0.0,
+            "per_channel": per_channel,
+        }
+
+    nopump_undepleted_bit_exact: bool | None = None
+    if check_undepleted and pump_model == "depleted" and "nopump" in nonlinear_outputs:
+        undepleted = make_wideband_fiber(
+            [], nonlinear=True, pump_model="undepleted", coarse_step_m=step_m
+        ).forward(wdm_input)
+        nopump_undepleted_bit_exact = bool(
+            np.array_equal(undepleted.data, nonlinear_outputs["nopump"])
+        )
+
+    stem = file_stem if file_stem is not None else tag
+    npz_path = output_dir / f"{stem}.npz"
+    np.savez_compressed(npz_path, **arrays)
+    document = {
+        "schema_version": 1,
+        "dataset_family": "dra_wideband",
+        "model": {
+            "name": "DistributedRamanFiber",
+            "propagator": "in-house symmetric NumPy SSFM (never PyNLO path)",
+            "pump_model": pump_model,
+            "pump_model_detail": (
+                "Depleted pumps are integrated with RK4 along z at 25 m steps; the signal is "
+                "represented by its in-band total power at the channel-plan centre frequency. "
+                "No pump-pump Raman transfer and no pump ASE."
+            ),
+            "raman_spectrum": "Gaussian, peak 13.2 THz, sigma 2.12 THz",
+            "signal_effects": "loss + CD + Kerr retained; channel ISRS not modelled",
+            "ase": "not included in this reference dataset (dra_ase_model='none')",
+        },
+        "plan": plan.to_metadata(),
+        "fiber": {
+            "length_km": WIDEBAND_FIBER_LENGTH_KM,
+            "alpha_db_per_km": WIDEBAND_ALPHA_DB_PER_KM,
+            "alpha_model": "flat; 1550 nm value of the SMF_100KM polynomial",
+            "beta2_ps2_per_km": WIDEBAND_BETA2_PS2_PER_KM,
+            "beta3_ps3_per_km": WIDEBAND_BETA3_PS3_PER_KM,
+            "n2_si": WIDEBAND_N2_SI,
+            "a_eff_um2": WIDEBAND_A_EFF_UM2,
+            "coarse_step_m": float(step_m),
+        },
+        "signal": {
+            "modulation": MODULATION,
+            "symbol_rate_hz": plan.symbol_rate_hz,
+            "sps": plan.sps,
+            "roll_off": plan.roll_off,
+            "launch_power_dbm_per_pol": plan.launch_power_dbm_per_pol,
+            "num_symbols": plan.num_symbols,
+            "seed": int(seed),
+        },
+        "pump": _wideband_pump_metadata(plan),
+        "nli_analysis_bandwidth_hz": plan.symbol_rate_hz,
+        "nli_method": (
+            "Per channel, fit one complex scalar a to NL ≈ a*LIN in the 64 GHz symbol-rate band, "
+            "then take the band power of the residual NL-a*LIN as NLI. This removes the common "
+            "phase/gain that a coherent receiver would equalize. nli_power_raw_w (no fit) is "
+            "also recorded. out_linear uses the same pumps/loss/CD but n2=0."
+        ),
+        "coarse_step_m": float(step_m),
+        "step_converged": bool(probe["step_converged"]),
+        "step_artifact_500m_db": float(probe["step_artifact_500m_db"]),
+        "step_convergence": probe,
+        "nopump_undepleted_bit_exact": nopump_undepleted_bit_exact,
+        "num_samples": int(wdm_input.data.shape[-1]),
+        "samples_per_channel": plan.samples_per_channel,
+        "notes": _wideband_notes(plan, seed),
+        "configs": config_documents,
+    }
+    document["generation"] = {
+        "elapsed_s": float(time.perf_counter() - started),
+        "npz_size_bytes": int(npz_path.stat().st_size),
+        "json_path": str(output_dir / f"{stem}.json"),
+        "npz_path": str(npz_path),
+    }
+    (output_dir / f"{stem}.json").write_text(
+        json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return document
+
+
+def generate_wideband(
+    output_dir: Path,
+    *,
+    plan_names: tuple[str, ...] = tuple(WIDEBAND_PLANS),
+    num_symbols: int = WIDEBAND_NUM_SYMBOLS,
+    num_symbols_by_plan: dict[str, int] | None = None,
+    seeds: tuple[int, ...] = (WIDEBAND_SEED,),
+    step_m: float | None = None,
+    step_overrides: dict[str, float] | None = None,
+    pump_model: str = "depleted",
+    probe_only: bool = False,
+    probe_num_symbols: int = WIDEBAND_PROBE_NUM_SYMBOLS,
+    probe_steps_m: tuple[float, ...] = WIDEBAND_PROBE_STEPS_M,
+    reuse_probe: bool = False,
+) -> dict:
+    """生成 c57/cl152 全 WDM 参考数据（或只跑步长探针）。
+
+    ``step_m`` / ``step_overrides`` / ``probe`` 的优先级：逐计划覆盖 >
+    全局步长 > 探针收敛步长 > 探针最后一档。``reuse_probe=True`` 时读取已
+    有的 ``step_convergence.json``，避免重复跑昂贵的探针。
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    probe_path = output_dir / "step_convergence.json"
+    cached_probes: dict[str, dict] = {}
+    if reuse_probe and probe_path.exists():
+        cached_probes = json.loads(probe_path.read_text(encoding="utf-8")).get("plans", {})
+    probes: dict[str, dict] = dict(cached_probes) if reuse_probe else {}
+    documents: dict[str, dict] = {}
+    for name in plan_names:
+        if name not in WIDEBAND_PLANS:
+            raise KeyError(f"unknown wideband plan {name!r}; available: {sorted(WIDEBAND_PLANS)}")
+        base_plan = WIDEBAND_PLANS[name]
+        probe = cached_probes.get(name)
+        if probe is None:
+            probe = wideband_step_convergence(
+                base_plan,
+                probe_steps_m,
+                num_symbols=probe_num_symbols,
+                seed=seeds[0],
+                pump_model=pump_model,
+            )
+        probes[name] = probe
+        if probe_only:
+            continue
+        override = None if step_overrides is None else step_overrides.get(name)
+        if override is not None:
+            chosen_step = float(override)
+        elif step_m is not None:
+            chosen_step = float(step_m)
+        else:
+            chosen_step = float(probe["converged_step_m"] or probe["steps"][-1]["step_m"])
+        symbols = (
+            num_symbols_by_plan.get(name, num_symbols) if num_symbols_by_plan else num_symbols
+        )
+        plan = base_plan.with_num_symbols(symbols)
+        for seed in seeds:
+            stem = plan.name if seed == WIDEBAND_SEED else f"{plan.name}_seed{seed}"
+            documents[stem] = generate_wideband_plan(
+                plan,
+                output_dir,
+                seed=seed,
+                step_m=chosen_step,
+                probe=probe,
+                pump_model=pump_model,
+                file_stem=stem,
+                # 152ch 的 nopump 额外传播会把单配置推到 ~17 min；该等价性
+                # 已由短记录单测覆盖，主数据生成时只对 <=57ch 做逐位复核。
+                check_undepleted=plan.n_channels <= 57,
+            )
+
+    # 复用探针时只读不写，避免两个计划并发生成时互相覆盖。
+    if not reuse_probe or probe_only:
+        probe_path.write_text(
+            json.dumps(
+                {
+                    "generated_by": "examples/generate_dra_reference.py --wideband",
+                    "probe_num_symbols": int(probe_num_symbols),
+                    "probe_seed": int(seeds[0]),
+                    "pump_model": pump_model,
+                    "tolerance_db": STEP_CONVERGENCE_TOL_DB,
+                    "plans": probes,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        print(f"Wrote {probe_path}")
+    return {"probes": probes, "documents": documents}
 
 
 def _populate_dataset(
@@ -724,6 +1480,22 @@ def generate_depleted(
     )
 
 
+def _parse_named_values(items: list[str] | None, value_type):
+    """把 ``NAME=VALUE`` 列表解析成字典；用于逐计划覆盖步长/符号数。"""
+    if not items:
+        return None
+    parsed = {}
+    for item in items:
+        name, separator, value = item.partition("=")
+        if not separator or not name:
+            raise ValueError(f"expected NAME=VALUE, got {item!r}")
+        try:
+            parsed[name] = value_type(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid value in {item!r}: {exc}") from exc
+    return parsed
+
+
 def main() -> None:
     """命令行入口。"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -754,9 +1526,106 @@ def main() -> None:
         action="store_true",
         help="跳过默认的 dra_reference.{npz,json}（配合 --depleted 使用）",
     )
+    parser.add_argument(
+        "--wideband",
+        action="store_true",
+        help="生成 c57/cl152 全 WDM 参考（默认目录 examples/dra_reference_wide）",
+    )
+    parser.add_argument(
+        "--wideband-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "dra_reference_wide",
+        help="全 WDM 输出目录 (默认: examples/dra_reference_wide)",
+    )
+    parser.add_argument(
+        "--wideband-plans",
+        nargs="+",
+        choices=sorted(WIDEBAND_PLANS),
+        default=None,
+        help="要生成的全 WDM 计划 (默认: c57 cl152)",
+    )
+    parser.add_argument(
+        "--wideband-step-m",
+        type=float,
+        default=None,
+        help="覆盖所有全 WDM 计划的 SSFM 步长；省略时用 64-symbol 探针自动确定",
+    )
+    parser.add_argument(
+        "--wideband-step-map",
+        nargs="+",
+        default=None,
+        metavar="NAME=STEP",
+        help="逐计划覆盖 SSFM 步长，如 c57=0.9765625 cl152=0.48828125",
+    )
+    parser.add_argument(
+        "--wideband-symbols-map",
+        nargs="+",
+        default=None,
+        metavar="NAME=SYMBOLS",
+        help="逐计划覆盖符号数，如 cl152=128",
+    )
+    parser.add_argument(
+        "--reuse-probe",
+        action="store_true",
+        help="复用输出目录已有的 step_convergence.json，不重跑探针",
+    )
+    parser.add_argument(
+        "--wideband-probe-only",
+        action="store_true",
+        help="只跑步长探针并写 step_convergence.json，不生成主数据集",
+    )
+    parser.add_argument(
+        "--wideband-probe-symbols",
+        type=int,
+        default=WIDEBAND_PROBE_NUM_SYMBOLS,
+        help="步长探针的符号数 (默认 64)",
+    )
+    parser.add_argument(
+        "--wideband-probe-steps",
+        type=float,
+        nargs="+",
+        default=list(WIDEBAND_PROBE_STEPS_M),
+        help="步长探针的初始步长序列 (m)",
+    )
+    parser.add_argument(
+        "--wideband-second-seed",
+        action="store_true",
+        help=f"同时生成第二个 seed ({WIDEBAND_SECOND_SEED}) 的数据集",
+    )
     args = parser.parse_args()
     if args.coarse_step_m <= 0:
         parser.error("--coarse-step-m must be positive")
+    if args.wideband:
+        if args.wideband_step_m is not None and args.wideband_step_m <= 0:
+            parser.error("--wideband-step-m must be positive")
+        if args.wideband_probe_symbols < 1:
+            parser.error("--wideband-probe-symbols must be positive")
+        if any(step <= 0 for step in args.wideband_probe_steps):
+            parser.error("--wideband-probe-steps must be positive")
+        try:
+            step_overrides = _parse_named_values(args.wideband_step_map, float)
+            num_symbols_by_plan = _parse_named_values(args.wideband_symbols_map, int)
+        except ValueError as exc:
+            parser.error(str(exc))
+        seeds = (
+            (args.seed, WIDEBAND_SECOND_SEED)
+            if args.wideband_second_seed
+            else (args.seed,)
+        )
+        generate_wideband(
+            args.wideband_dir,
+            plan_names=tuple(args.wideband_plans or WIDEBAND_PLANS),
+            num_symbols=args.symbols,
+            num_symbols_by_plan=num_symbols_by_plan,
+            seeds=seeds,
+            step_m=args.wideband_step_m,
+            step_overrides=step_overrides,
+            probe_only=args.wideband_probe_only,
+            probe_num_symbols=args.wideband_probe_symbols,
+            probe_steps_m=tuple(args.wideband_probe_steps),
+            reuse_probe=args.reuse_probe,
+        )
+        return
     if not args.skip_base:
         generate(args.output_dir, args.symbols, args.seed, args.coarse_step_m)
         print(f"Wrote {args.output_dir / 'dra_reference.npz'} and dra_reference.json")
