@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -295,11 +296,26 @@ class FiberChannel(BaseBlock):
         )
         return Signal(data=final_data.astype(np.complex64), ctx=new_ctx)
 
-    def _forward_numpy(self, opt_signal: Signal) -> Signal:
+    def _forward_numpy(
+        self,
+        opt_signal: Signal,
+        step_gain: Callable[[float, float, np.ndarray], np.ndarray] | None = None,
+    ) -> Signal:
         """用自带的对称分步傅里叶 (SSFM) 求解器传播信号。
 
         这是 PyNLO/CuPy 不可用时的回退路径，输出元数据中带
         ``fiber_solver="numpy-ssfm"`` 以便下游识别。
+
+        Parameters
+        ----------
+        opt_signal : Signal
+            输入光信号。
+        step_gain : callable | None, optional
+            可选的逐 SSFM 步幅度增益钩子，签名为
+            ``step_gain(z_center_m, dz_m, omega_rad_per_s) -> amplitude_factor``。
+            用于分布式拉曼放大等需要在每一步施加频率相关增益的场景。
+            为 None 时行为与原始回退路径逐位一致。增益率按步中点取值，
+            并在非线性前后各施加一半；因此要求 ``dz`` 远小于增益剖面变化尺度。
 
         Notes
         -----
@@ -353,12 +369,20 @@ class FiberChannel(BaseBlock):
             raman = None
 
         rng = np.random.default_rng()
-        for _ in range(n_steps):
+        for step in range(n_steps):
             data = np.fft.ifft(np.fft.fft(data, axis=-1) * half_linear, axis=-1)
+            step_gain_factor = None
+            if step_gain is not None:
+                # 分布式增益作为线性算符在非线性前后各施加一半（对称分步）。
+                z_center = (step + 0.5) * dz
+                step_gain_factor = np.sqrt(step_gain(z_center, dz, omega))[None, :]
+                data *= step_gain_factor
             power = np.sum(np.abs(data) ** 2, axis=0)
             if raman is not None:
                 power = np.real(np.fft.ifft(np.fft.fft(power) * np.fft.fft(raman))) / n_samples
             data *= np.exp(1j * (8 / 9) * center_gamma * nonlinear_length * power)[None, :]
+            if step_gain_factor is not None:
+                data *= step_gain_factor
             if self.d_pmd_ps_per_sqrt_km > 0:
                 theta = np.arcsin(np.sqrt(rng.random()))
                 phi, psi = 2 * np.pi * rng.random(2)
