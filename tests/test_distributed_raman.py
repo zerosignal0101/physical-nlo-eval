@@ -222,7 +222,7 @@ def test_invalid_models_raise() -> None:
 
 
 def test_reference_dataset_schema_and_snr() -> None:
-    """已提交的 3/5 信道参考数据应包含可用的功率/NLI/SNR 数据点。"""
+    """已提交的 3/5/7 信道参考数据应包含可用的功率/NLI/SNR 数据点。"""
     json_path = REFERENCE_DIR / "dra_reference.json"
     npz_path = REFERENCE_DIR / "dra_reference.npz"
     assert json_path.exists(), f"missing reference metadata: {json_path}"
@@ -231,7 +231,7 @@ def test_reference_dataset_schema_and_snr() -> None:
     metadata = json.loads(json_path.read_text(encoding="utf-8"))
     with np.load(npz_path) as arrays:
         assert metadata["schema_version"] == 1
-        assert set(metadata["datasets"]) == {"3ch", "5ch"}
+        assert set(metadata["datasets"]) == {"3ch", "5ch", "7ch"}
 
         for dataset in metadata["datasets"].values():
             input_key = dataset["input_key"]
