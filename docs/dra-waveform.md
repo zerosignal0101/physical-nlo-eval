@@ -167,7 +167,7 @@ python examples/generate_dra_reference.py
 
 | 项目 | 值 |
 | --- | --- |
-| 信道数 | 3 与 5 |
+| 信道数 | 3、5，另加 7 信道压力测试 |
 | 调制 | DP-QPSK，50 GBd，RRC roll-off 0.1，sps=4 |
 | 信道间隔 | 100 GHz |
 | 入纤功率 | 0 dBm / 偏振 / 信道 |
@@ -237,6 +237,8 @@ nopump, fwd_0p10w, fwd_0p20w, bwd_0p10w, bwd_0p20w
 6. **3 信道波形 SNR 数据点**：参考数据中 `3ch` 的
    `nopump`、`bwd_0p20w` 中心信道 `snr_nli_db` 与 `snr_evm_db` 均 > 20 dB；
    前向 0.2 W 因入纤即被放大，NLI 明显更差，体现前后向泵的物理差异。
+7. **7 信道压力测试**：`7ch` 用于观察有限信道数与 NLI 提取的收敛性；
+   它尚未被纳入解析模型校准域。
 
 ## 8. 作为解析 DRA 模型的参考
 
