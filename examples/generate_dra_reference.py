@@ -61,6 +61,11 @@ DATASETS = {
         "offsets_hz": np.array([-200e9, -100e9, 0.0, 100e9, 200e9]),
         "sample_rate_hz": 700e9,
     },
+    "7ch": {
+        "count": 7,
+        "offsets_hz": np.array([-300e9, -200e9, -100e9, 0.0, 100e9, 200e9, 300e9]),
+        "sample_rate_hz": 900e9,
+    },
 }
 
 CONFIGS: dict[str, list[PumpSpec]] = {
