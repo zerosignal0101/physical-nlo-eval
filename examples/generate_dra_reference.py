@@ -8,6 +8,14 @@
     python examples/generate_dra_reference.py --depleted            # 追加耗尽数据集
     python examples/generate_dra_reference.py --depleted --skip-base
 
+收敛数据（62.5 m）生成到独立目录::
+
+    python examples/generate_dra_reference.py \
+        --output-dir examples/dra_reference_converged --coarse-step-m 62.5
+    python examples/generate_dra_reference.py \
+        --output-dir examples/dra_reference_converged --coarse-step-m 62.5 \
+        --depleted --skip-base
+
 默认输出 ``dra_reference.npz``（输入/输出复波形）和 ``dra_reference.json``
 （参数、逐信道功率/NLI/SNR、EVM 等元数据）。``--depleted`` 另行输出
 ``dra_reference_depleted.{npz,json}``：3/5 信道耗尽参考、1 信道 SPM 探针，
@@ -87,6 +95,13 @@ ONE_CHANNEL_CONFIGS = ("nopump", "fwd_0p20w", "bwd_0p20w")
 #: 发射功率扫描（dBm/偏振）：0.5/1/2 mW。
 POWER_SWEEP_DBM_PER_POL = (-3.0103, 0.0, 3.0103)
 POWER_SWEEP_TAG = "3ch_power_sweep"
+
+#: 历史数据使用的粗步长；新生成的收敛数据应显著小于它。
+HISTORICAL_STEP_M = 500.0
+#: 步长收敛判据：相邻两档步长的中心信道 SNR 差应小于该值。
+STEP_CONVERGENCE_TOL_DB = 0.01
+#: 走离经验判据：每步的群速度走离应 ≲0.15 symbol。
+WALK_OFF_TARGET_SYMBOLS = 0.15
 
 
 def _sweep_tag(power_dbm_per_pol: float) -> str:
@@ -213,7 +228,11 @@ def center_channel_evm(
 
 
 def make_fiber(
-    pumps: list[PumpSpec], *, nonlinear: bool, pump_model: str = "undepleted"
+    pumps: list[PumpSpec],
+    *,
+    nonlinear: bool,
+    pump_model: str = "undepleted",
+    coarse_step_m: float = COARSE_STEP_M,
 ) -> DistributedRamanFiber:
     """构造 DRA 光纤；``nonlinear=False`` 时关闭 Kerr 作为线性参考。"""
     return DistributedRamanFiber(
@@ -222,12 +241,103 @@ def make_fiber(
         beta2_ps2_per_km=BETA2_PS2_PER_KM,
         beta3_ps3_per_km=BETA3_PS3_PER_KM,
         pumps=pumps,
-        coarse_step_size_m=COARSE_STEP_M,
+        coarse_step_size_m=coarse_step_m,
         n2_si=N2_SI if nonlinear else 0.0,
         a_eff_um2=A_EFF_UM2,
         pump_model=pump_model,
         add_ase=False,
     )
+
+
+def walkoff_per_step_symbols(max_offset_hz: float, coarse_step_m: float) -> float:
+    """返回每一步 SSFM 的群速度走离，单位为 symbol。
+
+    ``Δτ = 2π · Δf · |β2| · dz``，再除以符号周期 ``1/Rs``。``Δf`` 取最外
+    信道相对中心信道的频偏。
+    """
+    beta2_s2_per_m = abs(BETA2_PS2_PER_KM) * 1e-24 / 1e3
+    return float(2 * np.pi * max_offset_hz * beta2_s2_per_m * coarse_step_m * SYMBOL_RATE_HZ)
+
+
+def recommended_step_m(max_offset_hz: float) -> float | None:
+    """按每步走离 0.15 symbol 折算的建议步长 (m)；单信道无走离时返回 None。"""
+    walkoff = walkoff_per_step_symbols(max_offset_hz, 1.0)
+    return float(WALK_OFF_TARGET_SYMBOLS / walkoff) if walkoff > 0 else None
+
+
+def _step_criterion_metadata(coarse_step_m: float) -> dict:
+    """走离判据及其对各数据集的建议步长。"""
+    per_dataset = {}
+    for tag, spec in DATASETS.items():
+        max_offset = float(np.max(np.abs(spec["offsets_hz"])))
+        per_dataset[tag] = {
+            "max_offset_from_center_hz": max_offset,
+            "walkoff_per_step_symbols": walkoff_per_step_symbols(max_offset, coarse_step_m),
+            "recommended_step_m_for_target": recommended_step_m(max_offset),
+        }
+    return {
+        "walkoff_formula": "2*pi*delta_f*abs(beta2)*dz*symbol_rate",
+        "target_walkoff_symbols": WALK_OFF_TARGET_SYMBOLS,
+        "coarse_step_m": float(coarse_step_m),
+        "datasets": per_dataset,
+    }
+
+
+def center_channel_snr_db(
+    wdm_input: Signal,
+    spec: dict,
+    coarse_step_m: float,
+    pump_model: str = "undepleted",
+) -> float:
+    """无泵配置下中心信道的 SNR_NLI，用于步长收敛审计。"""
+    nonlinear_output = make_fiber(
+        [], nonlinear=True, pump_model=pump_model, coarse_step_m=coarse_step_m
+    ).forward(wdm_input)
+    linear_output = make_fiber(
+        [], nonlinear=False, pump_model=pump_model, coarse_step_m=coarse_step_m
+    ).forward(wdm_input)
+    center_idx = spec["count"] // 2
+    power, nli_power, *_ = band_nli_metrics(
+        nonlinear_output.data,
+        linear_output.data,
+        spec["sample_rate_hz"],
+        float(spec["offsets_hz"][center_idx]),
+        NLI_ANALYSIS_BANDWIDTH_HZ,
+    )
+    return float(10 * np.log10(power / nli_power)) if nli_power > 0 else float("inf")
+
+
+def step_convergence_metadata(
+    wdm_input: Signal,
+    spec: dict,
+    coarse_step_m: float,
+    pump_model: str = "undepleted",
+) -> dict:
+    """计算数据集的步长收敛元数据。
+
+    以无泵中心信道 SNR 为准：``last_increment_db`` 是粗步长与半步长的差，
+    ``step_artifact_500m_db`` 是历史 500 m 相对当前步长的差（负值表示
+    500 m 高估了 NLI）。
+    """
+    snr_coarse = center_channel_snr_db(wdm_input, spec, coarse_step_m, pump_model)
+    snr_half = center_channel_snr_db(wdm_input, spec, coarse_step_m / 2.0, pump_model)
+    snr_500 = center_channel_snr_db(wdm_input, spec, HISTORICAL_STEP_M, pump_model)
+    max_offset = float(np.max(np.abs(spec["offsets_hz"])))
+    walkoff = walkoff_per_step_symbols(max_offset, coarse_step_m)
+    return {
+        "coarse_step_m": float(coarse_step_m),
+        "half_step_m": float(coarse_step_m / 2.0),
+        "center_snr_db": snr_coarse,
+        "last_increment_db": snr_coarse - snr_half,
+        "tolerance_db": STEP_CONVERGENCE_TOL_DB,
+        "step_converged": bool(abs(snr_coarse - snr_half) < STEP_CONVERGENCE_TOL_DB),
+        "step_artifact_500m_db": snr_500 - snr_coarse,
+        "max_offset_from_center_hz": max_offset,
+        "walkoff_per_step_symbols": walkoff,
+        "walkoff_target_symbols": WALK_OFF_TARGET_SYMBOLS,
+        "recommended_step_m_for_target": recommended_step_m(max_offset),
+        "metric": "nopump center-channel snr_nli_db",
+    }
 
 
 def _populate_dataset(
@@ -241,11 +351,14 @@ def _populate_dataset(
     pump_model: str,
     launch_power_dbm_per_pol: float,
     purpose: str | None = None,
+    coarse_step_m: float = COARSE_STEP_M,
+    record_step_metadata: bool = False,
 ) -> None:
     """生成并记录一个数据集（输入波形 + 各配置的非线性/线性输出）。
 
     ``purpose`` 为 None 时保持默认数据集的 JSON 结构不变；耗尽数据集会额外
     写入 ``pump_model`` / ``purpose`` / ``launch_power_dbm_per_pol``。
+    ``record_step_metadata=True`` 时写入步长收敛字段（用于收敛数据集）。
     """
     wdm_input, bits, constellation = build_wdm_dataset(
         tag, spec, num_symbols, seed, launch_power_dbm_per_pol
@@ -276,11 +389,25 @@ def _populate_dataset(
         dataset_meta["pump_model"] = pump_model
         dataset_meta["purpose"] = purpose
         dataset_meta["launch_power_dbm_per_pol"] = launch_power_dbm_per_pol
+    if record_step_metadata:
+        dataset_meta["pump_model"] = pump_model
+        dataset_meta["coarse_step_m"] = float(coarse_step_m)
+        dataset_meta["step_convergence"] = step_convergence_metadata(
+            wdm_input, spec, coarse_step_m, pump_model
+        )
+        dataset_meta["step_converged"] = dataset_meta["step_convergence"]["step_converged"]
+        dataset_meta["step_artifact_500m_db"] = dataset_meta["step_convergence"][
+            "step_artifact_500m_db"
+        ]
 
     no_pump_channel_powers: list[float] | None = None
     for config_name, pumps in configs.items():
-        nonlinear_output = make_fiber(pumps, nonlinear=True, pump_model=pump_model).forward(wdm_input)
-        linear_output = make_fiber(pumps, nonlinear=False, pump_model=pump_model).forward(wdm_input)
+        nonlinear_output = make_fiber(
+            pumps, nonlinear=True, pump_model=pump_model, coarse_step_m=coarse_step_m
+        ).forward(wdm_input)
+        linear_output = make_fiber(
+            pumps, nonlinear=False, pump_model=pump_model, coarse_step_m=coarse_step_m
+        ).forward(wdm_input)
 
         arrays[f"nl_{tag}_{config_name}"] = nonlinear_output.data.astype(np.complex64)
         arrays[f"lin_{tag}_{config_name}"] = linear_output.data.astype(np.complex64)
@@ -360,9 +487,12 @@ def _populate_dataset(
     metadata["datasets"][tag] = dataset_meta
 
 
-def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
+def generate(
+    output_dir: Path, num_symbols: int, seed: int, coarse_step_m: float = COARSE_STEP_M
+) -> None:
     """生成并保存默认（未耗尽）参考数据集。"""
     output_dir.mkdir(parents=True, exist_ok=True)
+    record_step_metadata = coarse_step_m != COARSE_STEP_M
     arrays: dict[str, np.ndarray] = {}
     metadata: dict = {
         "schema_version": 1,
@@ -381,7 +511,7 @@ def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
             "beta3_ps3_per_km": BETA3_PS3_PER_KM,
             "n2_si": N2_SI,
             "a_eff_um2": A_EFF_UM2,
-            "coarse_step_m": COARSE_STEP_M,
+            "coarse_step_m": float(coarse_step_m),
         },
         "signal": {
             "modulation": MODULATION,
@@ -411,6 +541,15 @@ def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
         ],
         "datasets": {},
     }
+    if record_step_metadata:
+        metadata["coarse_step_m"] = float(coarse_step_m)
+        metadata["pump_model"] = "undepleted"
+        metadata["step_criterion"] = _step_criterion_metadata(coarse_step_m)
+        metadata["notes"].append(
+            f"Step-converged dataset generated at {coarse_step_m} m instead of the historical "
+            f"{HISTORICAL_STEP_M} m; per-dataset step_artifact_500m_db records the residual "
+            "difference of the historical step."
+        )
 
     for tag, spec in DATASETS.items():
         _populate_dataset(
@@ -424,6 +563,8 @@ def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
             "undepleted",
             LAUNCH_POWER_DBM_PER_POL,
             None,
+            coarse_step_m,
+            record_step_metadata,
         )
 
     np.savez_compressed(output_dir / "dra_reference.npz", **arrays)
@@ -432,9 +573,12 @@ def generate(output_dir: Path, num_symbols: int, seed: int) -> None:
     )
 
 
-def generate_depleted(output_dir: Path, num_symbols: int, seed: int) -> None:
+def generate_depleted(
+    output_dir: Path, num_symbols: int, seed: int, coarse_step_m: float = COARSE_STEP_M
+) -> None:
     """生成泵浦耗尽数据集：3/5 信道、1 信道 SPM 探针、发射功率扫描。"""
     output_dir.mkdir(parents=True, exist_ok=True)
+    record_step_metadata = coarse_step_m != COARSE_STEP_M
     arrays: dict[str, np.ndarray] = {}
     metadata: dict = {
         "schema_version": 1,
@@ -460,7 +604,7 @@ def generate_depleted(output_dir: Path, num_symbols: int, seed: int) -> None:
             "beta3_ps3_per_km": BETA3_PS3_PER_KM,
             "n2_si": N2_SI,
             "a_eff_um2": A_EFF_UM2,
-            "coarse_step_m": COARSE_STEP_M,
+            "coarse_step_m": float(coarse_step_m),
         },
         "signal": {
             "modulation": MODULATION,
@@ -491,6 +635,15 @@ def generate_depleted(output_dir: Path, num_symbols: int, seed: int) -> None:
         ],
         "datasets": {},
     }
+    if record_step_metadata:
+        metadata["coarse_step_m"] = float(coarse_step_m)
+        metadata["pump_model"] = "depleted"
+        metadata["step_criterion"] = _step_criterion_metadata(coarse_step_m)
+        metadata["notes"].append(
+            f"Step-converged dataset generated at {coarse_step_m} m instead of the historical "
+            f"{HISTORICAL_STEP_M} m; per-dataset step_artifact_500m_db records the residual "
+            "difference of the historical step."
+        )
 
     for tag in ("3ch", "5ch"):
         spec = DATASETS[tag]
@@ -508,6 +661,8 @@ def generate_depleted(output_dir: Path, num_symbols: int, seed: int) -> None:
                 f"{spec['count']}-channel depleted-pump counterpart of dra_reference; "
                 "compare on_off_gain_db and snr_nli_db against the undepleted dataset."
             ),
+            coarse_step_m,
+            record_step_metadata,
         )
 
     _populate_dataset(
@@ -521,6 +676,8 @@ def generate_depleted(output_dir: Path, num_symbols: int, seed: int) -> None:
         "depleted",
         LAUNCH_POWER_DBM_PER_POL,
         "Single-channel SPM probe: one channel, no XPM, used to separate SPM from XPM under pumping.",
+        coarse_step_m,
+        record_step_metadata,
     )
 
     for power_dbm in POWER_SWEEP_DBM_PER_POL:
@@ -539,6 +696,8 @@ def generate_depleted(output_dir: Path, num_symbols: int, seed: int) -> None:
                 "Launch-power sweep at 3ch with a 0.2 W forward pump; "
                 f"launch {10 ** (power_dbm / 10):.2f} mW per pol. Used to fit NLI ∝ P^3."
             ),
+            coarse_step_m,
+            record_step_metadata,
         )
 
     metadata["power_sweep"] = {
@@ -567,6 +726,15 @@ def main() -> None:
     parser.add_argument("--symbols", type=int, default=256, help="每信道符号数")
     parser.add_argument("--seed", type=int, default=20261104, help="比特/波形生成种子")
     parser.add_argument(
+        "--coarse-step-m",
+        type=float,
+        default=COARSE_STEP_M,
+        help=(
+            "SSFM 粗步长 (m)。默认 500 m 与历史数据逐位一致；"
+            "收敛数据建议 62.5 m（7ch 可用 31.25 m）"
+        ),
+    )
+    parser.add_argument(
         "--depleted",
         action="store_true",
         help="同时生成 dra_reference_depleted.{npz,json}（3/5ch、1ch、发射功率扫描）",
@@ -577,11 +745,13 @@ def main() -> None:
         help="跳过默认的 dra_reference.{npz,json}（配合 --depleted 使用）",
     )
     args = parser.parse_args()
+    if args.coarse_step_m <= 0:
+        parser.error("--coarse-step-m must be positive")
     if not args.skip_base:
-        generate(args.output_dir, args.symbols, args.seed)
+        generate(args.output_dir, args.symbols, args.seed, args.coarse_step_m)
         print(f"Wrote {args.output_dir / 'dra_reference.npz'} and dra_reference.json")
     if args.depleted:
-        generate_depleted(args.output_dir, args.symbols, args.seed)
+        generate_depleted(args.output_dir, args.symbols, args.seed, args.coarse_step_m)
         print(
             f"Wrote {args.output_dir / 'dra_reference_depleted.npz'} "
             "and dra_reference_depleted.json"

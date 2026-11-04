@@ -32,7 +32,9 @@ from physics_nlo_eval.core.signal import Signal, SignalContext
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_DIR = REPO_ROOT / "examples" / "dra_reference"
+CONVERGED_DIR = REPO_ROOT / "examples" / "dra_reference_converged"
 GENERATOR_PATH = REPO_ROOT / "examples" / "generate_dra_reference.py"
+STEP_CHECKER_PATH = REPO_ROOT / "examples" / "check_dra_step_convergence.py"
 
 
 def _signal(
@@ -440,4 +442,130 @@ def test_depleted_reference_dataset_schema() -> None:
         for tag in metadata["power_sweep"]["dataset_tags"]
     ]
     assert nli_by_power[0] < nli_by_power[1] < nli_by_power[2]
+
+
+def test_converged_reference_dataset_schema_and_step_metadata() -> None:
+    """62.5 m 收敛数据集应完整，并记录步长收敛元数据与关键 SNR。"""
+    json_path = CONVERGED_DIR / "dra_reference.json"
+    npz_path = CONVERGED_DIR / "dra_reference.npz"
+    assert json_path.exists(), f"missing converged metadata: {json_path}"
+    assert npz_path.exists(), f"missing converged waveforms: {npz_path}"
+
+    metadata = json.loads(json_path.read_text(encoding="utf-8"))
+    legacy = json.loads((REFERENCE_DIR / "dra_reference.json").read_text(encoding="utf-8"))
+    assert metadata["schema_version"] == 1
+    assert metadata["coarse_step_m"] == 62.5
+    assert metadata["pump_model"] == "undepleted"
+    assert "nli_method" in metadata
+    assert set(metadata["datasets"]) == {"3ch", "5ch", "7ch"}
+    assert metadata["step_criterion"]["target_walkoff_symbols"] == 0.15
+
+    with np.load(npz_path) as arrays:
+        for dataset in metadata["datasets"].values():
+            assert dataset["coarse_step_m"] == 62.5
+            assert dataset["pump_model"] == "undepleted"
+            assert dataset["step_converged"] is True
+            assert isinstance(dataset["step_artifact_500m_db"], float)
+            convergence = dataset["step_convergence"]
+            assert convergence["coarse_step_m"] == 62.5
+            assert abs(convergence["last_increment_db"]) < 0.01
+            assert convergence["recommended_step_m_for_target"] > 0.0
+
+            input_key = dataset["input_key"]
+            assert arrays[input_key].ndim == 2
+            assert arrays[input_key].shape[1] == dataset["num_samples"]
+            assert set(dataset["configs"]) == {
+                "nopump",
+                "fwd_0p10w",
+                "fwd_0p20w",
+                "bwd_0p10w",
+                "bwd_0p20w",
+            }
+            for config in dataset["configs"].values():
+                assert (
+                    arrays[config["waveform_nonlinear_key"]].shape
+                    == arrays[config["waveform_linear_key"]].shape
+                    == arrays[input_key].shape
+                )
+                assert len(config["per_channel"]) == dataset["n_channels"]
+
+        # 5ch/7ch 无泵的中心信道 SNR 应收敛到约 36.33/36.27 dB。
+        five = metadata["datasets"]["5ch"]
+        seven = metadata["datasets"]["7ch"]
+        snr_5ch = five["configs"]["nopump"]["per_channel"][five["center_channel_index"]]["snr_nli_db"]
+        snr_7ch = seven["configs"]["nopump"]["per_channel"][seven["center_channel_index"]][
+            "snr_nli_db"
+        ]
+        assert abs(snr_5ch - 36.33) < 0.05
+        assert abs(snr_7ch - 36.27) < 0.05
+
+    # 3ch 在 500 m 已收敛，新旧数据差应 < 0.1 dB。
+    three_legacy = legacy["datasets"]["3ch"]
+    three_converged = metadata["datasets"]["3ch"]
+    legacy_snr = three_legacy["configs"]["nopump"]["per_channel"][
+        three_legacy["center_channel_index"]
+    ]["snr_nli_db"]
+    converged_snr = three_converged["configs"]["nopump"]["per_channel"][
+        three_converged["center_channel_index"]
+    ]["snr_nli_db"]
+    assert abs(converged_snr - legacy_snr) < 0.1
+    assert three_converged["step_artifact_500m_db"] < 0.1
+
+
+def test_converged_depleted_reference_dataset_schema() -> None:
+    """62.5 m 耗尽数据集应复用 WP3 逻辑并记录收敛字段。"""
+    json_path = CONVERGED_DIR / "dra_reference_depleted.json"
+    npz_path = CONVERGED_DIR / "dra_reference_depleted.npz"
+    assert json_path.exists(), f"missing converged depleted metadata: {json_path}"
+    assert npz_path.exists(), f"missing converged depleted waveforms: {npz_path}"
+
+    metadata = json.loads(json_path.read_text(encoding="utf-8"))
+    assert metadata["coarse_step_m"] == 62.5
+    assert metadata["pump_model"] == "depleted"
+    assert set(metadata["datasets"]) == {
+        "3ch",
+        "5ch",
+        "1ch",
+        "3ch_0p5mw",
+        "3ch_1p0mw",
+        "3ch_2p0mw",
+    }
+
+    with np.load(npz_path) as arrays:
+        for dataset in metadata["datasets"].values():
+            assert dataset["pump_model"] == "depleted"
+            assert dataset["step_converged"] is True
+            assert abs(dataset["step_convergence"]["last_increment_db"]) < 0.01
+            assert arrays[dataset["input_key"]].shape[1] == dataset["num_samples"]
+            for config in dataset["configs"].values():
+                nl = arrays[config["waveform_nonlinear_key"]]
+                lin = arrays[config["waveform_linear_key"]]
+                assert np.all(np.isfinite(nl)) and np.all(np.isfinite(lin))
+                assert len(config["per_channel"]) == dataset["n_channels"]
+
+
+def _load_step_checker():
+    """把步长收敛检查脚本作为模块加载。"""
+    spec = importlib.util.spec_from_file_location("_dra_step_checker", STEP_CHECKER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_step_convergence_checker_core_on_3ch() -> None:
+    """检查脚本的核心函数应在 3ch 上给出收敛结果与 500 m 伪影。"""
+    checker = _load_step_checker()
+    report = checker.run_probes(
+        checker.DEFAULT_NPZ,
+        probes=(("3ch", "nopump"),),
+        steps_m=(500.0, 62.5, 31.25),
+    )
+    probe = report["probes"]["3ch"]["nopump"]
+    assert len(probe["steps"]) == 3
+    assert abs(probe["last_increment_db"]) < 0.01
+    assert 0.0 < probe["artifact_500m_db"] < 0.1
+    assert checker.failed_increments(report, 0.01) == []
+    # 人为收紧容差时应能报出失败。
+    assert len(checker.failed_increments(report, 0.001)) == 1
 
