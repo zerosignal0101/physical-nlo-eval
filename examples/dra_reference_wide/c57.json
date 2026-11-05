@@ -287,8 +287,8 @@
       "output_power_per_pol_w": 0.0013685970334336162,
       "dra_ase_model": "none",
       "dra_ase_power_per_pol_w": 0.0,
-      "center_channel_evm_percent": 2.1640981882259793,
-      "center_channel_snr_evm_db": 33.29446077114912,
+      "center_channel_evm_percent": 2.085548171671539,
+      "center_channel_snr_evm_db": 33.61559548870037,
       "center_channel_common_gain_db": -0.00291002608041779,
       "center_channel_common_phase_deg": -59.40594624973683,
       "per_channel": [
@@ -976,7 +976,9 @@
           "common_phase_deg": -59.36321040602248,
           "on_off_gain_db": 0.0
         }
-      ]
+      ],
+      "center_channel_evm_common_gain_db": -0.0028471225269861332,
+      "center_channel_evm_common_phase_deg": -59.40599224868639
     },
     "fwd_0p20w": {
       "waveform_nonlinear_key": "nl_c57_fwd_0p20w",
@@ -992,8 +994,8 @@
       "output_power_per_pol_w": 0.0028982521034777164,
       "dra_ase_model": "none",
       "dra_ase_power_per_pol_w": 0.0,
-      "center_channel_evm_percent": 3.8254220881298275,
-      "center_channel_snr_evm_db": 28.34641277657454,
+      "center_channel_evm_percent": 3.7805097741962443,
+      "center_channel_snr_evm_db": 28.44899269535487,
       "center_channel_common_gain_db": -0.007889763430681162,
       "center_channel_common_phase_deg": -155.63436876692396,
       "per_channel": [
@@ -1681,7 +1683,9 @@
           "common_phase_deg": -155.39931356755548,
           "on_off_gain_db": 2.1108707283903834
         }
-      ]
+      ],
+      "center_channel_evm_common_gain_db": -0.0077695908001666515,
+      "center_channel_evm_common_phase_deg": -155.6341981912333
     },
     "bwd_0p20w": {
       "waveform_nonlinear_key": "nl_c57_bwd_0p20w",
@@ -1697,8 +1701,8 @@
       "output_power_per_pol_w": 0.008998528122901917,
       "dra_ase_model": "none",
       "dra_ase_power_per_pol_w": 0.0,
-      "center_channel_evm_percent": 2.2225652779708738,
-      "center_channel_snr_evm_db": 33.06290949402822,
+      "center_channel_evm_percent": 2.147904666773904,
+      "center_channel_snr_evm_db": 33.35969996794905,
       "center_channel_common_gain_db": -0.003002151141726186,
       "center_channel_common_phase_deg": -37.41611835571735,
       "per_channel": [
@@ -2386,7 +2390,9 @@
           "common_phase_deg": -37.378938131568184,
           "on_off_gain_db": 5.24280552455984
         }
-      ]
+      ],
+      "center_channel_evm_common_gain_db": -0.0029395457595069725,
+      "center_channel_evm_common_phase_deg": -37.41613223499971
     }
   },
   "generation": {
@@ -2394,5 +2400,6 @@
     "npz_size_bytes": 1926685,
     "json_path": "/home/zsig/Documents/gits/wt/dra-aperiodic/examples/dra_reference_wide/c57.json",
     "npz_path": "/home/zsig/Documents/gits/wt/dra-aperiodic/examples/dra_reference_wide/c57.npz"
-  }
+  },
+  "evm_method": "Wideband chromatic-dispersion compensation on the propagator's n/(n-1) frequency grid before WDMDemux, then single complex common-gain alignment, RRC matched filter, blind constant-modulus fractional-timing recovery, and EVM with the first 30 symbols ignored. Recomputed from the stored nl/lin waveforms with the corrected receiver path; propagation was not rerun."
 }
