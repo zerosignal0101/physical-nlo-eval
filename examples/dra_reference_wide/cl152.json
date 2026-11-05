@@ -317,10 +317,10 @@
       "output_power_per_pol_w": 0.003648515557870269,
       "dra_ase_model": "none",
       "dra_ase_power_per_pol_w": 0.0,
-      "center_channel_evm_percent": null,
-      "center_channel_snr_evm_db": null,
-      "center_channel_common_gain_db": 0.0010368331512930304,
-      "center_channel_common_phase_deg": 67.03249004563844,
+      "center_channel_evm_percent": 2.598569806313353,
+      "center_channel_snr_evm_db": 31.705312241517557,
+      "center_channel_common_gain_db": 0.0009301705525895305,
+      "center_channel_common_phase_deg": 67.0341724137853,
       "per_channel": [
         {
           "channel_id": 0,
@@ -2194,10 +2194,10 @@
       "output_power_per_pol_w": 0.027172498404979706,
       "dra_ase_model": "none",
       "dra_ase_power_per_pol_w": 0.0,
-      "center_channel_evm_percent": null,
-      "center_channel_snr_evm_db": null,
-      "center_channel_common_gain_db": 0.0009745479367601928,
-      "center_channel_common_phase_deg": 131.77797047260634,
+      "center_channel_evm_percent": 2.7007064416882094,
+      "center_channel_snr_evm_db": 31.37045239387852,
+      "center_channel_common_gain_db": 0.0008683712159769433,
+      "center_channel_common_phase_deg": 131.7798046394061,
       "per_channel": [
         {
           "channel_id": 0,
@@ -4041,10 +4041,10 @@
       "output_power_per_pol_w": 0.006920489948242903,
       "dra_ase_model": "none",
       "dra_ase_power_per_pol_w": 0.0,
-      "center_channel_evm_percent": null,
-      "center_channel_snr_evm_db": null,
-      "center_channel_common_gain_db": -0.0034030236483382054,
-      "center_channel_common_phase_deg": -178.7631887754915,
+      "center_channel_evm_percent": 3.8983170078097698,
+      "center_channel_snr_evm_db": 28.18245694652005,
+      "center_channel_common_gain_db": -0.00357416333705824,
+      "center_channel_common_phase_deg": -178.76027014959823,
       "per_channel": [
         {
           "channel_id": 0,
@@ -5881,5 +5881,5 @@
     "json_path": "/home/zsig/Documents/gits/wt/dra-aperiodic/examples/dra_reference_wide/cl152.json",
     "npz_path": "/home/zsig/Documents/gits/wt/dra-aperiodic/examples/dra_reference_wide/cl152.npz"
   },
-  "evm_note": "Receiver-EVM path is validated on c57 only; cl152 demux/RRC leaves a symbol-timing/phase ambiguity (EVM ~143% independent of config), so the EVM fields are nulled. Spectral snr_nli_db is unaffected."
+  "evm_method": "Wideband chromatic-dispersion compensation on the propagator's n/(n-1) frequency grid before WDMDemux, then single complex common-gain alignment, RRC matched filter, blind constant-modulus fractional-timing recovery, and EVM with the first 30 symbols ignored. Recomputed from the stored nl/lin waveforms with the corrected receiver path; propagation was not rerun."
 }
