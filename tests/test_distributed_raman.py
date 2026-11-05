@@ -229,6 +229,12 @@ def test_invalid_models_raise() -> None:
         DistributedRamanFiber(pumps=None, raman_fwhm_hz=0.0, **common)
     with pytest.raises(ValueError, match="spontaneous"):
         DistributedRamanFiber(pumps=None, ase_spontaneous_factor=-1.0, **common)
+    with pytest.raises(ValueError, match="depletion_coupling"):
+        DistributedRamanFiber(
+            pumps=PumpSpec(1450.0, 0.2, "forward"),
+            depletion_coupling="channelwise",
+            **common,
+        )
 
 
 def test_reference_dataset_schema_and_snr() -> None:
@@ -443,6 +449,91 @@ def test_depleted_profile_requires_forward() -> None:
         fiber.pump_power_w(0.0)
     with pytest.raises(RuntimeError, match="forward"):
         fiber.on_off_gain(193.1e12)
+
+
+def test_depletion_coupling_center_reproduces_committed_depleted_waveform() -> None:
+    """默认 ``depletion_coupling="center"`` 必须逐位复现已提交的耗尽波形。
+
+    锁定"新增的带内平均选项不得改动旧数值路径"这一约定。3ch/0.2 W 前向泵
+    数据集在上游只跑 200 步，重算成本很低。
+    """
+    metadata = json.loads(
+        (REFERENCE_DIR / "dra_reference_depleted.json").read_text(encoding="utf-8")
+    )
+    generator = _load_generator()
+    tag = "3ch"
+    wdm_input, _, _ = generator.build_wdm_dataset(
+        tag,
+        generator.DATASETS[tag],
+        int(metadata["signal"]["num_symbols"]),
+        int(metadata["signal"]["seed"]),
+    )
+    output = generator.make_fiber(
+        generator.CONFIGS["fwd_0p20w"], nonlinear=True, pump_model="depleted"
+    ).forward(wdm_input)
+    assert output.ctx.meta["dra_depletion_coupling"] == "center"
+    with np.load(REFERENCE_DIR / "dra_reference_depleted.npz") as arrays:
+        assert np.array_equal(output.data, arrays[f"nl_{tag}_fwd_0p20w"])
+
+
+def test_depletion_coupling_default_equals_explicit_center() -> None:
+    """缺省参数与显式 ``"center"`` 必须给出逐位相同的波形和泵浦剖面。"""
+    signal = _signal(n_samples=512, power_w=5e-3)
+    common = _fiber_kwargs(pumps=PumpSpec(1450.0, 0.2, "backward"), pump_model="depleted")
+
+    default = DistributedRamanFiber(**common).forward(signal)
+    explicit = DistributedRamanFiber(depletion_coupling="center", **common).forward(signal)
+    assert np.array_equal(default.data, explicit.data)
+    assert (
+        default.ctx.meta["dra_pump_energy_balance"]["pumps"][0]["transferred_to_signal_w"]
+        == explicit.ctx.meta["dra_pump_energy_balance"]["pumps"][0]["transferred_to_signal_w"]
+    )
+    assert default.ctx.meta["dra_depletion_coupling"] == "center"
+    assert explicit.ctx.meta["dra_depletion_coupling"] == "center"
+
+
+def test_band_average_matches_center_for_narrowband_signal() -> None:
+    """窄带信号（100 GHz）带内拉曼谱几乎不变，两种口径必须几乎一致。"""
+    signal = _signal(n_samples=1024, sample_rate_hz=100e9, power_w=5e-2, seed=5)
+    residuals = {}
+    for coupling in ("center", "band_average"):
+        fiber = DistributedRamanFiber(
+            pumps=PumpSpec(1450.0, 0.2, "forward"),
+            pump_model="depleted",
+            depletion_coupling=coupling,
+            **_fiber_kwargs(coarse_step_size_m=2000.0),
+        )
+        fiber.forward(signal)
+        residuals[coupling] = float(fiber.pump_power_w(fiber.length_m)[0])
+    assert np.isclose(
+        residuals["band_average"], residuals["center"], rtol=2e-3, atol=0.0
+    )
+
+
+def test_band_average_changes_wideband_pump_residual_for_both_directions() -> None:
+    """宽带信号下带内平均耦合低于中心耦合，泵浦耗尽更弱、残余功率更高。
+
+    1450 nm 泵浦在中心频率正好落在 13.2 THz 拉曼峰上，而 4.6 THz 带宽的
+    两侧都在峰外，因此 ``γ_band < γ_center``；前向和后向泵都应表现为更少的
+    耗尽（即更高的残余功率）。符号与幅度都要可解释，而不是数值噪声。
+    """
+    signal = _signal(n_samples=2048, sample_rate_hz=4.608e12, power_w=5e-2, seed=7)
+    for direction in ("forward", "backward"):
+        residuals = {}
+        for coupling in ("center", "band_average"):
+            fiber = DistributedRamanFiber(
+                pumps=PumpSpec(1450.0, 0.2, direction),
+                pump_model="depleted",
+                depletion_coupling=coupling,
+                **_fiber_kwargs(coarse_step_size_m=2000.0),
+            )
+            fiber.forward(signal)
+            residuals[coupling] = float(
+                fiber.pump_power_w(fiber.length_m if direction == "forward" else 0.0)[0]
+            )
+        # 少耗尽 => 残余更高。窄带时该差异 <0.1%，宽带时应远大于此。
+        assert residuals["band_average"] > residuals["center"]
+        assert residuals["band_average"] / residuals["center"] > 1.05
 
 
 def test_depleted_reference_dataset_schema() -> None:
