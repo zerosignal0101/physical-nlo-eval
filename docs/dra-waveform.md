@@ -722,14 +722,20 @@ C 或 C+L 全 WDM。数据在 `examples/dra_reference_wide/`，不覆盖旧目�
 | cl152 | 0.488 | 33.2165 | 34.4813 | — | +1.27 dB |
 | cl152 | 0.244 | 34.2264 | 35.6347 | — | +1.41 dB |
 
-- 2× 与 3× 在 0.977 m 只差 **0.003 dB**，说明 2× 已足够消除混叠；
-  3× 没有再降低 NLI。
-- 2× 的 cl152 三点（0.977/0.488/0.244 = 31.4344/34.4813/35.6347 dB）
-  满足 `NLI = N_p + C·dz^p`（p≈2.13），外推收敛值
-  **≈ 36.05 dB**；0.244 m 距外推值约 0.42 dB。
-- 因此 **cl152 的 alias-free 收敛估计是 36.0 dB**；1× 的 34.98 dB
-  低估约 1.1 dB。主数据仍用 1×（运行时间减半、与旧数据同口径），
-  文档和对照结果必须标注这个 ~1.1–1.4 dB 的系统偏差。
+- 2× 与 3× 在 0.977 m 只差 **0.003 dB**（同一 seed），说明 2× 在
+  **固定输入**下已足够消除混叠；3× 没有再降低 NLI。
+- **但 64-symbol 记录的 seed 散布极大**：cl152 nopump、2×、0.244 m 的
+  4 个 seed 中心 SNR 为 35.635 / 26.216 / 24.446 / 33.962 dB，
+  均值 **30.06 ± 5.56 dB**（极差 11.19 dB）。同 seed 的 1×→2× 偏差
+  +1.4 dB 仍然成立，但单次 64-symbol 2× 值不能当作收敛估计。
+- 128-symbol、2×、0.244 m 的两个 seed 为 33.502 / 34.247 dB，
+  均值 **33.87 ± 0.53 dB**（极差 0.75 dB）；1× 128-symbol 主数据
+  32.473 dB 加上 ~1.3 dB 混叠偏差正好约 33.8 dB，两者一致。
+- 因此 **cl152 的 alias-free 中心估计是 ~33.8–33.9 dB**，不是之前
+  由单次 64-symbol 三点外推得到的 36.05 dB；36.05 是 4 个 64-symbol
+  seed 中的最大值，不能引用。主数据的 ~1.1–1.4 dB 1× 混叠偏差仍成立。
+- 详细 per-seed 表见 `docs/dra-ensemble.md` 与
+  `examples/dra_reference_wide/diagnostics/cl152_nopump_2x_ensemble*.json`。
 
 #### 12.2.2 记录长度与 seed 集成：绝对 NLI 有 1–2 dB 统计散布
 
@@ -835,27 +841,31 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
 | c57 | 1× 两 seed 均值 | 33.649 | 33.133 | **−0.516** |
 | c57 | 2×、256 sym、seed 20261104 | 35.476 | 33.133 | **−2.343** |
 | cl152 | 1×、128 sym、0.244 m 主数据 | 32.473 | 32.765 | **+0.292** |
-| cl152 | 1×、64 sym、0.122 m 探针 | 34.679 | 32.765 | **−1.914** |
-| cl152 | 2×、64 sym、0.244 m 探针 | 35.635 | 32.765 | **−2.870** |
-| cl152 | 2× 三点外推（上界） | ≈36.05 | 32.765 | **≈−3.29** |
+| cl152 | 2×、128 sym、0.244 m、2 seed 均值 | 33.874 | 32.765 | **−1.109** |
+| cl152 | 1×、64 sym、0.122 m 探针（单次） | 34.679 | 32.765 | −1.914 |
+| cl152 | 2×、64 sym、0.244 m 探针（4 seed 中最大） | 35.635 | 32.765 | −2.870 |
 
 - c57 的 1× 单 seed 残差在 −1.46…+0.42 dB 之间，两 seed 均值 −0.52 dB，
   与 3/5/7ch 的 ±1 dB 量级一致；但单次实现的散布有 ~1.9 dB，不能只看
   一个 seed。
 - c57 的 2× 数据（同一 seed）把波形抬高 0.89 dB，残差变为 −2.34 dB；
   说明 1× 的 +0.42…−1.46 dB 里包含约 0.4–0.9 dB 的混叠偏差。
-- **cl152 的 64-symbol 探针与 128-symbol 主数据差 3.2 dB**
-  （32.473…35.635 dB）。这不是单调的步长/混叠趋势：128-symbol 1×
-  主数据给出 +0.29 dB（解析略乐观），64-symbol 0.122/2× 探针给出
-  −1.9…−2.9 dB（解析略保守）。差异主要来自全 WDM 的**单次实现
-  统计散布（2–3 dB）**，而不是解析模型的系统偏差。2× 外推的
-  36.05 dB 是单次 64-symbol 实现的上界，未被 128-symbol 主数据证实。
+- **cl152 的最佳 alias-free 估计是 2× 128-symbol 两 seed 均值
+  33.874 ± 0.53 dB**，残差 **−1.11 dB**（解析略保守，落在 ±1.5 dB）。
+  1× 128-symbol 主数据 32.473 dB 加上 ~1.3 dB 混叠偏差正好约 33.8 dB，
+  两条独立路径一致。
+- 64-symbol 的 34.68 / 35.64 dB 是**单次实现**：同一 cl152 2× 设置的
+  4 个 64-symbol seed 跨 24.45…35.64 dB（均值 30.06、标准差 5.56 dB）。
+  之前的 “3.2 dB 跨 32.47…35.64” 主要来自这个 64-symbol seed 散布，
+  不是解析模型的系统偏差；36.05 dB 的三点外推正是取了 4 个 seed 中
+  最大的一个，不能引用。
 - §12.2.3 的 QPSK-vs-高斯对照显示调制格式有 7 dB 的一阶影响，说明
-  GN 的 Gaussian 假设是 152ch 的一个真实口径项；但要把 2–3 dB 的
-  统计散布压到亚 dB，需要收敛的高斯控制 + 多 seed 2× 集成。
-- 因此：**57ch/152ch 的 nopump 与 backward 在 2–3 dB 统计预算内与
-  解析一致；单次实现的残差不能按 ±0.5 dB 引用。forward 不可用
-  （记录长度伪影）。**
+  GN 的 Gaussian 假设是 152ch 的一个真实口径项；但 152ch 的绝对
+  nopump 残差实测约 −1.1 dB，不是 −3 dB。要把调制项定量拆开，需要
+  收敛的高斯控制 + 更多 128-symbol seed。
+- 因此：**57ch/152ch 的 nopump 与 backward 在 ~1–1.5 dB 内与解析一致
+  （152ch 的 128-symbol 2× 均值 −1.1 dB）；64-symbol 探针只能看同 seed
+  的步长趋势，不能给绝对 NLI。forward 不可用（记录长度伪影）。**
 
 ### 12.4 限制
 
@@ -882,13 +892,16 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
   相位上会把 64-symbol nopump EVM 从 29.8 dB 假降到 16.7 dB。
   全 WDM 的 EVM 必须显式传 `cdc_freq_scale=n_full/(n_full-1)`
   （`center_channel_evm` 的可选参数；默认保持旧 3/5/7ch 行为）。
-- **cl152 步长/统计**：`step_converged: false`。2× 64-symbol 三点外推
-  给出 36.05 dB（单次实现的上界）；128-symbol 1× 主数据是 32.47 dB。
-  两者的 3.2 dB 差主要是记录长度/seed 散布（2–3 dB），不是步长
-  （0.244 m 与 0.122 m 只差 0.45 dB）或混叠（3× 与 2× 只差 0.003 dB）。
-- **全 WDM 统计预算**：c57 nopump 的 5 次测量标准差 0.90 dB；cl152
-  的 64/128-symbol 与 1×/2× 测量跨 3.2 dB。任何全 WDM 残差都应带
-  “单次实现 ±2–3 dB”的标注，除非做了多 seed 集成。
+- **cl152 步长/统计**：`step_converged: false`。2× 128-symbol 两 seed
+  均值 **33.87 ± 0.53 dB**；1× 128-symbol 主数据 32.47 dB 加 ~1.3 dB
+  混叠 ≈ 33.8 dB，一致。2× 64-symbol 的 4-seed 均值
+  **30.06 ± 5.56 dB**（极差 11.19 dB）；单次 64-symbol 的 35.64 dB 是
+  4 个 seed 中最大，三点外推 36.05 dB 不可引用。步长本身（0.244 与
+  0.122 m 同 seed）只差 0.45 dB，3× 与 2× 同 seed 只差 0.003 dB。
+- **全 WDM 统计预算**：c57 nopump 5 次测量标准差 0.90 dB；cl152
+  64-symbol 4-seed 标准差 5.56 dB，128-symbol 2-seed 标准差 0.53 dB。
+  绝对 NLI 必须用 128-symbol（或更长）多 seed 集成；64-symbol 只用于
+  同 seed 的步长趋势。
 - **调制口径**：波形是恒模 DP-QPSK，GN 假设高斯；152ch 下两者 NLI
   相差 7 dB。跨调制/跨模型比较必须固定调制口径。
 
@@ -918,6 +931,11 @@ PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
 PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
     examples/generate_dra_reference.py --wideband --reuse-probe \
     --wideband-plans c57 --wideband-step-map c57=0.48828125 --seed 20261105
+
+# cl152 2× 多 seed 集成（绝对 NLI 的推荐口径；128 symbols，两个 seed）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_cl152_ensemble.py --symbols 128 \
+    --seeds 20261104 20261105 --workers 2
 
 # 3) 解析自检（只读调用 network-nlo-eval）
 PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
