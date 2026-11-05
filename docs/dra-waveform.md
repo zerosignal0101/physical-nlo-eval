@@ -788,8 +788,44 @@ C 或 C+L 全 WDM。数据在 `examples/dra_reference_wide/`，不覆盖旧目�
   收敛到 0.5 dB。结论是“真实发散 + 短记录低估”两者叠加，而不是
   单一估计器伪影。
 - 因此 **EVM 不能把前向泵救回绝对校准**：512-symbol 前向 EVM 仍有
-  20.8% 误差、SNR 13.65 dB，且未饱和。前向泵仍只能给趋势/相对比较，
-  绝对 NLI 需要更长记录或非周期方法。EVM 作为独立审计指标保留。
+  20.8% 误差、SNR 13.65 dB，且未饱和。长记录延伸（见下）证实
+  2048 symbols 仍在下降；前向泵仍只能给趋势/相对比较，绝对 NLI
+  需要非周期传播器。EVM 作为独立审计指标保留。
+
+**长记录延伸：超过走离仍不饱和，长记录前向参考不可行。**
+
+把 `fwd_0p20w` 延伸到 1024/2048 symbols（0.977 m，seed 20261104），
+并在 1024 symbols 用 0.488 m 复算，同时给出 nopump 同记录长度控制：
+
+| symbols | 步长 (m) | fwd 频谱 (dB) | fwd EVM (dB) | nopump 频谱 (dB) | nopump EVM (dB) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | 0.488 | 14.153 | 13.652 | 33.722 | 32.948 |
+| 512 | 0.977 | — | — | 33.722 | 32.948 |
+| 1024 | 0.488 | 8.660 | 8.318 | — | — |
+| 1024 | 0.977 | 8.660 | 8.317 | 33.232 | 32.683 |
+| 2048 | 0.977 | 4.723 | 4.140 | 33.529 | 33.135 |
+| 2048 | 0.488 | 未运行 | 未运行 | — | — |
+
+- **步长对照通过**：1024 symbols 的 0.488/0.977 m 结果在
+  0.0001 dB 内一致（EVM 8.3175 vs 8.3174 dB，频谱均为 8.6602 dB）。
+  c57 在 0.488 m 已收敛，因此 0.977 m 的 1024/2048 延伸可直接与
+  0.488 m 的 512 点拼接；既有 256-symbol fwd 的 0.977 m 频谱
+  20.1306 dB 也与 0.488 m 的 20.1307 dB 一致。
+- **不饱和**：前向 EVM 从 512 的 13.65 dB 继续降到 1024 的 8.32 dB、
+  2048 的 4.14 dB。`EVM(2048) − EVM(1024) = −4.18 dB`，远大于
+  0.5 dB 的饱和阈值。记录长度 2048 symbols 已超过 c57 的信道间
+  走离（≈1832 symbols），但 EVM 仍在陡降，**走离不是饱和点**；
+  下降在 512→1024→2048 仍约 4–5 dB/倍长度。
+- **nopump 控制**：同一步长 0.977 m 下 512/1024/2048 的 EVM 为
+  32.95/32.68/33.14 dB，三点非单调、跨度 0.46 dB，没有记录长度
+  发散。这再次确认下降是前向泵特有的，而不是 EVM/CDC 口径或
+  频谱估计器随记录长度的系统误差。
+- **结论**：长记录前向参考**不可行**。2048 symbols 的 fwd EVM 只有
+  4.14 dB（62.1% EVM），且仍在下降；把记录拉长到超过走离并不能
+  得到收敛值。**57ch 前向泵的绝对校准需要 channelized/aperiodic
+  传播器**（或按记录长度外推到无穷的模型），不能靠加长周期性记录
+  实现。前向泵数据仍只能用于趋势/相对比较，EVM 作为独立审计指标
+  保留。
 
 走离判据（`2π·Δf_max·|β2|·dz·Rs`）：
 
@@ -879,13 +915,19 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
   NLI 统计散布远大于 3/5/7ch：c57 nopump 64/128/256/512 symbols 与
   两个 256-symbol seed 的均值为 33.24 dB、标准差 0.90 dB。单次实现
   不能用于 0.1–0.2 dB 级比较；需要多 seed 集成。
-- **前向泵记录长度依赖（EVM 已证实）**：c57 `fwd_0p20w` 的频谱
-  NLI 随记录长度持续增长（64→512 symbols，26.78→14.15 dB，512
-  仍未饱和）；同一批波形的接收机 EVM SNR 也从 22.44 降到 13.65 dB。
-  两者在 512 symbols 只差 0.50 dB，说明发散存在于传播后的波形中，
-  **不是纯频谱估计器伪影**；短记录（64 symbols）的频谱比 EVM 悲观
-  4.35 dB，是单复增益拟合吸收部分 NLI 的二次效应。57ch 前向泵的
-  256-symbol 波形不能用作绝对校准，EVM 也不能替代更长记录。
+- **前向泵记录长度依赖（EVM 已证实，长记录仍不饱和）**：c57
+  `fwd_0p20w` 的频谱 NLI 随记录长度持续增长（64→512 symbols，
+  26.78→14.15 dB）；同一批波形的接收机 EVM SNR 也从 22.44 降到
+  13.65 dB。延伸到 2048 symbols（0.977 m，与 0.488 m 在 1024
+  symbols 对照到 0.0001 dB）后，EVM 继续降到 1024 的 8.32 dB、
+  2048 的 4.14 dB，`EVM(2048) − EVM(1024) = −4.18 dB`，远超
+  0.5 dB 的饱和阈值。2048 symbols 已超过 c57 信道间走离
+  （≈1832 symbols），但没有饱和迹象；nopump 同长度控制
+  （32.95/32.68/33.14 dB）非单调、跨度 0.46 dB，确认该发散是前向
+  泵特有。因此 **长记录周期性前向参考不可行**：57ch 前向泵的绝对
+  校准需要 channelized/aperiodic 传播器；256/512/2048-symbol 的
+  前向波形都只能用于趋势/相对比较。短记录（64 symbols）的频谱比
+  EVM 悲观 4.35 dB，是单复增益拟合吸收部分 NLI 的二次效应。
 - **EVM 的 CDC 频率网格口径**：全 WDM 的传播器在全带宽记录上按
   `n_full/(n_full-1)` 缩放 fftfreq，demux 后 CDC 默认按信道样本
   `n_ch/(n_ch-1)` 缩放。短记录下两者相差 ~0.4%，在 100 km 的 β₂
@@ -944,6 +986,22 @@ PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
 # 4) 前向泵记录长度：频谱 NLI vs 接收机 EVM（约 70 min）
 PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
     examples/check_dra_forward_record.py
+
+# 4b) 长记录延伸（0.977 m）：1024/2048 symbols
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_forward_record.py --symbols 1024 2048 \
+    --configs fwd_0p20w --step-m 0.9765625 \
+    --output examples/dra_reference_wide/diagnostics/c57_forward_long_record_evm_0p977.json
+# 1024-symbol 步长对照（0.488 m）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_forward_record.py --symbols 1024 \
+    --configs fwd_0p20w --step-m 0.48828125 \
+    --output examples/dra_reference_wide/diagnostics/c57_forward_long_record_evm_0p488.json
+# nopump 同长度控制（0.977 m）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_forward_record.py --symbols 512 1024 2048 \
+    --configs nopump --step-m 0.9765625 \
+    --output examples/dra_reference_wide/diagnostics/c57_nopump_long_record_evm_0p977.json
 
 # 5) 质量门
 PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python -m pytest tests/test_distributed_raman.py -q
