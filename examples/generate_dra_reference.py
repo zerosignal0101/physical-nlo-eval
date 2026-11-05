@@ -445,8 +445,26 @@ def center_channel_evm(
     center_idx: int,
     tx_bits: np.ndarray,
     constellation: Constellation,
+    *,
+    fiber_length_km: float = FIBER_LENGTH_KM,
+    beta2_ps2_per_km: float = BETA2_PS2_PER_KM,
+    beta3_ps3_per_km: float = BETA3_PS3_PER_KM,
+    sps: int = SPS,
+    roll_off: float = ROLL_OFF,
+    cdc_freq_scale: float | None = None,
 ) -> tuple[float, float, float, float]:
-    """对中心信道执行 demux → 公共相位对齐 → CDC → 匹配滤波 → EVM。"""
+    """对中心信道执行 demux → 公共相位对齐 → CDC → 匹配滤波 → EVM。
+
+    光纤参数默认取 3/5/7ch 历史口径；全 WDM 调用时必须传入
+    :data:`WIDEBAND_*` 参数，否则 CDC 会留下 ~8% 的残余色散。
+
+    ``cdc_freq_scale`` 用于消除 CDC 的频率轴约定误差。传播器在**全带宽**
+    记录上使用 ``n_full/(n_full-1)`` 的 fftfreq 缩放，而 demux 后 CDC 只
+    看到 ``n_ch`` 个信道样本、内部按 ``n_ch/(n_ch-1)`` 缩放。短记录下两者
+    相差可达 0.4%，在 100 km 的 β₂ 相位上足以把 EVM 从 ~30 dB 压到
+    ~17 dB。全 WDM 调用应传入 ``n_full/(n_full-1)``；默认 ``None`` 保持
+    旧 3/5/7ch 行为不变。
+    """
     # 理想矩形滤波避免短 FIR 在 27.5 GHz 截止处的边带失真。
     stacked_nl = WDMDemux(filter_type="ideal_rectangular").forward(nonlinear_output)
     stacked_lin = WDMDemux(filter_type="ideal_rectangular").forward(linear_output)
@@ -461,12 +479,23 @@ def center_channel_evm(
     aligned_data = channel_nl.data / common_gain
     channel_nl = Signal(data=aligned_data, ctx=channel_nl.ctx)
 
+    if cdc_freq_scale is not None:
+        n_channel_samples = int(channel_nl.data.shape[-1])
+        native_scale = (
+            n_channel_samples / (n_channel_samples - 1)
+            if n_channel_samples > 1
+            else 1.0
+        )
+        scale_ratio = cdc_freq_scale / native_scale
+        beta2_ps2_per_km = beta2_ps2_per_km * scale_ratio**2
+        beta3_ps3_per_km = beta3_ps3_per_km * scale_ratio**3
+
     channel_nl = ChromaticDispersionComp(
-        fiber_length_km=FIBER_LENGTH_KM,
-        beta2_ps2_per_km=BETA2_PS2_PER_KM,
-        beta3_ps3_per_km=BETA3_PS3_PER_KM,
+        fiber_length_km=fiber_length_km,
+        beta2_ps2_per_km=beta2_ps2_per_km,
+        beta3_ps3_per_km=beta3_ps3_per_km,
     ).forward(channel_nl)
-    channel_nl = RRCFilter(sps=SPS, roll_off=ROLL_OFF, is_matched_filter=True).forward(channel_nl)
+    channel_nl = RRCFilter(sps=sps, roll_off=roll_off, is_matched_filter=True).forward(channel_nl)
     evm_percent = BERCalculator(ignore_headers=30).calculate_evm(channel_nl, constellation, tx_bits)
     snr_db = float(20 * np.log10(100.0 / evm_percent)) if evm_percent > 0 else float("inf")
     return (
@@ -475,6 +504,12 @@ def center_channel_evm(
         float(20 * np.log10(np.abs(common_gain))),
         float(np.angle(common_gain, deg=True)),
     )
+
+
+def _full_band_cdc_freq_scale(wdm_input: Signal) -> float:
+    """全带宽传播器用的 fftfreq 缩放，供 demux 后的 CDC 抵消网格约定。"""
+    n_samples = int(wdm_input.data.shape[-1])
+    return n_samples / (n_samples - 1) if n_samples > 1 else 1.0
 
 
 def make_fiber(
@@ -678,8 +713,15 @@ def wideband_center_channel_metrics(
     step_m: float,
     pumps: list[PumpSpec],
     pump_model: str = "depleted",
+    *,
+    bits: np.ndarray | None = None,
+    constellation: Constellation | None = None,
 ) -> dict:
-    """在给定步长下传播，返回中心信道的功率/NLI/SNR。"""
+    """在给定步长下传播，返回中心信道的功率/NLI/SNR。
+
+    同时给出 ``bits`` 与 ``constellation`` 时，复用同一次传播计算中心
+    信道的 EVM/SNR，避免为诊断重复跑昂贵的 SSFM。
+    """
     nonlinear = make_wideband_fiber(
         pumps, nonlinear=True, pump_model=pump_model, coarse_step_m=step_m
     ).forward(wdm_input)
@@ -695,7 +737,7 @@ def wideband_center_channel_metrics(
         plan.symbol_rate_hz,
     )
     snr_nli_db = float(10 * np.log10(power / nli_power)) if nli_power > 0 else None
-    return {
+    metrics = {
         "center_channel_index": center_idx,
         "center_freq_offset_hz": float(plan.offsets_hz[center_idx]),
         "signal_power_w": power,
@@ -705,6 +747,29 @@ def wideband_center_channel_metrics(
         "common_gain_db": common_gain_db,
         "common_phase_deg": common_phase_deg,
     }
+    if bits is not None and constellation is not None:
+        evm_percent, snr_evm_db, evm_gain_db, evm_phase_deg = center_channel_evm(
+            nonlinear,
+            linear,
+            center_idx,
+            bits[center_idx],
+            constellation,
+            fiber_length_km=WIDEBAND_FIBER_LENGTH_KM,
+            beta2_ps2_per_km=WIDEBAND_BETA2_PS2_PER_KM,
+            beta3_ps3_per_km=WIDEBAND_BETA3_PS3_PER_KM,
+            sps=plan.sps,
+            roll_off=plan.roll_off,
+            cdc_freq_scale=_full_band_cdc_freq_scale(wdm_input),
+        )
+        metrics.update(
+            {
+                "center_channel_evm_percent": evm_percent,
+                "center_channel_snr_evm_db": snr_evm_db,
+                "center_channel_evm_common_gain_db": evm_gain_db,
+                "center_channel_evm_common_phase_deg": evm_phase_deg,
+            }
+        )
+    return metrics
 
 
 def wideband_step_convergence(
@@ -842,7 +907,8 @@ def generate_wideband_plan(
     """生成并保存一个全 WDM 计划的数据集，返回其元数据。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    wdm_input, bits, _ = build_wideband_dataset(plan, seed)
+    wdm_input, bits, constellation = build_wideband_dataset(plan, seed)
+    center_idx = plan.n_channels // 2
     tag = plan.name
     arrays: dict[str, np.ndarray] = {
         f"input_{tag}": wdm_input.data.astype(np.complex64),
@@ -852,6 +918,7 @@ def generate_wideband_plan(
 
     configs = WIDEBAND_CONFIGS[plan.name]
     raw_metrics: dict[str, list[dict]] = {}
+    evm_metrics: dict[str, dict] = {}
     nonlinear_outputs: dict[str, np.ndarray] = {}
     output_powers: dict[str, float] = {}
     for config_name, pumps in configs.items():
@@ -865,6 +932,25 @@ def generate_wideband_plan(
         arrays[f"lin_{tag}_{config_name}"] = linear.data.astype(np.complex64)
         nonlinear_outputs[config_name] = nonlinear.data
         output_powers[config_name] = float(np.mean(np.abs(nonlinear.data) ** 2))
+        evm_percent, snr_evm_db, evm_gain_db, evm_phase_deg = center_channel_evm(
+            nonlinear,
+            linear,
+            center_idx,
+            bits[center_idx],
+            constellation,
+            fiber_length_km=WIDEBAND_FIBER_LENGTH_KM,
+            beta2_ps2_per_km=WIDEBAND_BETA2_PS2_PER_KM,
+            beta3_ps3_per_km=WIDEBAND_BETA3_PS3_PER_KM,
+            sps=plan.sps,
+            roll_off=plan.roll_off,
+            cdc_freq_scale=_full_band_cdc_freq_scale(wdm_input),
+        )
+        evm_metrics[config_name] = {
+            "center_channel_evm_percent": evm_percent,
+            "center_channel_snr_evm_db": snr_evm_db,
+            "center_channel_common_gain_db": evm_gain_db,
+            "center_channel_common_phase_deg": evm_phase_deg,
+        }
         raw_metrics[config_name] = [
             {
                 "channel_id": idx,
@@ -924,6 +1010,7 @@ def generate_wideband_plan(
             "output_power_per_pol_w": output_powers[config_name],
             "dra_ase_model": "none",
             "dra_ase_power_per_pol_w": 0.0,
+            **evm_metrics[config_name],
             "per_channel": per_channel,
         }
 
