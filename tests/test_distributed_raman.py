@@ -597,9 +597,11 @@ def test_converged_depleted_reference_dataset_schema() -> None:
                 assert len(config["per_channel"]) == dataset["n_channels"]
 
     # 7ch 前向 0.2 W 的中心信道 SNR（62.5 m，耗尽模型）。
+    # 2026-11-05 修正 DRA 频变增益为频域施加后，前向泵 NLI 显著下降：
+    # 旧时域施加给出 22.384 dB，频域施加给出 24.399 dB。
     seven = metadata["datasets"]["7ch"]
     seven_forward = seven["configs"]["fwd_0p20w"]["per_channel"][seven["center_channel_index"]]
-    assert abs(seven_forward["snr_nli_db"] - 22.384) < 0.02
+    assert abs(seven_forward["snr_nli_db"] - 24.399) < 0.02
 
     compare_path = CONVERGED_DIR / "depleted_7ch_compare.json"
     assert compare_path.exists(), f"missing 7ch analytic comparison: {compare_path}"
@@ -610,10 +612,11 @@ def test_converged_depleted_reference_dataset_schema() -> None:
     assert abs(compare["waveform_snr_nli_db"] - seven_forward["snr_nli_db"]) < 1e-9
     assert abs(compare["analytic"]["hybrid_raman_paper"]["snr_nli_db"] - 23.387) < 0.01
     assert abs(compare["analytic"]["pcfm_h3_raman"]["snr_nli_db"] - 23.583) < 0.01
-    assert 0.9 < compare["analytic"]["hybrid_raman_paper"]["residual_db"] < 1.1
-    assert 1.1 < compare["analytic"]["pcfm_h3_raman"]["residual_db"] < 1.3
-    assert 2.0 < compare["historical_500m"]["step_correction_db"] < 2.2
-    assert 3.0 < compare["historical_500m"]["analytic_residual_db"]["hybrid_raman_paper"] < 3.2
+    # 修正后解析侧比波形保守约 1.0/0.8 dB（残差 = 解析 - 波形）。
+    assert -1.1 < compare["analytic"]["hybrid_raman_paper"]["residual_db"] < -0.9
+    assert -0.9 < compare["analytic"]["pcfm_h3_raman"]["residual_db"] < -0.7
+    assert 3.0 < compare["historical_500m"]["step_correction_db"] < 3.15
+    assert 1.95 < compare["historical_500m"]["analytic_residual_db"]["hybrid_raman_paper"] < 2.15
 
 
 def _load_step_checker():
@@ -818,3 +821,41 @@ def test_wideband_analytic_compare_document() -> None:
         assert row["analytic"]["config"] == "nopump"
         assert abs(row["residual_db"]) < 2.5
 
+
+
+def test_frequency_dependent_gain_is_applied_in_frequency_domain() -> None:
+    """频变拉曼增益必须乘在频谱上：零色散 CW 输入不得被幅度调制。
+
+    旧实现把 ``step_gain`` 逐样本乘在时域，相当于把增益谱映射到时间轴，
+    会给 CW 引入约 1% 的虚假幅度起伏；该起伏会污染接收机 EVM，并随记录
+    长度改变。这里用零色散、零非线性的 CW 输入锁住频域施加行为。
+    """
+    n_samples = 512
+    sample_rate_hz = 100e9
+    center_freq_hz = 193.1e12
+    ctx = SignalContext(
+        sample_rate=sample_rate_hz,
+        center_freq=center_freq_hz,
+        n_pol=2,
+        sps=4,
+        sym_rate=sample_rate_hz / 4,
+    )
+    constant = np.sqrt(1e-3)
+    data = np.full((2, n_samples), constant, dtype=np.complex128)
+    dra = DistributedRamanFiber(
+        length_m=20e3,
+        alpha_db_per_km=0.2,
+        beta2_ps2_per_km=0.0,
+        beta3_ps3_per_km=0.0,
+        pumps=PumpSpec(1450.0, 0.2, "forward"),
+        coarse_step_size_m=500.0,
+        n2_si=0.0,
+        a_eff_um2=80.0,
+        pump_model="undepleted",
+    )
+    output = dra.forward(Signal(data, ctx))
+    amplitude = np.abs(output.data)
+    assert np.allclose(amplitude, amplitude[0, 0], rtol=1e-10, atol=0.0)
+    expected_power_ratio = 10 ** (-0.2 * 20 / 10) * float(dra.on_off_gain(center_freq_hz))
+    measured_power_ratio = float(np.mean(np.abs(output.data) ** 2) / constant**2)
+    assert np.isclose(measured_power_ratio, expected_power_ratio, rtol=1e-3)
