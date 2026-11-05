@@ -1,0 +1,92 @@
+{
+  "generated_by": "examples/check_dra_forward_record.py",
+  "plan": "c57",
+  "configs": [
+    "nopump"
+  ],
+  "pump_model": "depleted",
+  "step_m": 0.9765625,
+  "seed": 20261104,
+  "symbols": [
+    512,
+    1024,
+    2048
+  ],
+  "evm_fiber_parameters": {
+    "length_km": 100.0,
+    "beta2_ps2_per_km": -21.7,
+    "beta3_ps3_per_km": 0.0001,
+    "sps": 4,
+    "roll_off": 0.1,
+    "cdc_freq_scale": "n_full/(n_full-1), matching the full-band propagator"
+  },
+  "note": "snr_nli_db is the in-band residual after one complex common-gain projection; center_channel_snr_evm_db is the receiver EVM SNR after demux -> common-gain alignment -> CDC -> matched RRC. Comparing their record-length trends separates a spectral-estimator/periodic-record artifact from a real propagation effect.",
+  "rows": [
+    {
+      "plan": "c57",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "num_symbols": 512,
+      "seed": 20261104,
+      "step_m": 0.9765625,
+      "num_samples": 36864,
+      "elapsed_s": 752.2022848711349,
+      "center_channel_index": 28,
+      "center_freq_offset_hz": 0.0,
+      "signal_power_w": 4.703565747866527e-05,
+      "nli_power_w": 1.9963224474909956e-08,
+      "nli_power_raw_w": 4.5976346095232675e-05,
+      "snr_nli_db": 33.72196528917368,
+      "common_gain_db": -0.0015473970151447256,
+      "common_phase_deg": -59.24603320081164,
+      "center_channel_evm_percent": 2.252053051855597,
+      "center_channel_snr_evm_db": 32.94842765956872,
+      "center_channel_evm_common_gain_db": -0.0019837091481225023,
+      "center_channel_evm_common_phase_deg": -59.23793513137292
+    },
+    {
+      "plan": "c57",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "num_symbols": 1024,
+      "seed": 20261104,
+      "step_m": 0.9765625,
+      "num_samples": 73728,
+      "elapsed_s": 2124.2581945620477,
+      "center_channel_index": 28,
+      "center_freq_offset_hz": 0.0,
+      "signal_power_w": 4.721668494118566e-05,
+      "nli_power_w": 2.243423819064096e-08,
+      "nli_power_raw_w": 4.625477562643262e-05,
+      "snr_nli_db": 33.23184165634602,
+      "common_gain_db": -0.00016243803772233003,
+      "common_phase_deg": -59.322839523949064,
+      "center_channel_evm_percent": 2.321898763991382,
+      "center_channel_snr_evm_db": 32.68313439305462,
+      "center_channel_evm_common_gain_db": -0.0013311938571148867,
+      "center_channel_evm_common_phase_deg": -59.32001336396212
+    },
+    {
+      "plan": "c57",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "num_symbols": 2048,
+      "seed": 20261104,
+      "step_m": 0.9765625,
+      "num_samples": 147456,
+      "elapsed_s": 4488.4647096777335,
+      "center_channel_index": 28,
+      "center_freq_offset_hz": 0.0,
+      "signal_power_w": 4.714070059411816e-05,
+      "nli_power_w": 2.091609285795465e-08,
+      "nli_power_raw_w": 4.6077512784505145e-05,
+      "snr_nli_db": 33.52915471387564,
+      "common_gain_db": -0.0015137699906753762,
+      "common_phase_deg": -59.24507630228757,
+      "center_channel_evm_percent": 2.2041444278385645,
+      "center_channel_snr_evm_db": 33.1351990298147,
+      "center_channel_evm_common_gain_db": -0.0023256309966948256,
+      "center_channel_evm_common_phase_deg": -59.24383698923509
+    }
+  ]
+}

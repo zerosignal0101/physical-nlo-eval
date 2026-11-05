@@ -1,0 +1,69 @@
+{
+  "generated_by": "examples/check_dra_forward_record.py",
+  "plan": "c57",
+  "configs": [
+    "fwd_0p20w"
+  ],
+  "pump_model": "depleted",
+  "step_m": 0.9765625,
+  "seed": 20261104,
+  "symbols": [
+    1024,
+    2048
+  ],
+  "evm_fiber_parameters": {
+    "length_km": 100.0,
+    "beta2_ps2_per_km": -21.7,
+    "beta3_ps3_per_km": 0.0001,
+    "sps": 4,
+    "roll_off": 0.1,
+    "cdc_freq_scale": "n_full/(n_full-1), matching the full-band propagator"
+  },
+  "note": "snr_nli_db is the in-band residual after one complex common-gain projection; center_channel_snr_evm_db is the receiver EVM SNR after demux -> common-gain alignment -> CDC -> matched RRC. Comparing their record-length trends separates a spectral-estimator/periodic-record artifact from a real propagation effect.",
+  "rows": [
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 1024,
+      "seed": 20261104,
+      "step_m": 0.9765625,
+      "num_samples": 73728,
+      "elapsed_s": 2508.292313647922,
+      "center_channel_index": 28,
+      "center_freq_offset_hz": 0.0,
+      "signal_power_w": 9.848861509438846e-05,
+      "nli_power_w": 1.3408189979480102e-05,
+      "nli_power_raw_w": 0.0003694867870984863,
+      "snr_nli_db": 8.660158758144064,
+      "common_gain_db": -0.6311951037661145,
+      "common_phase_deg": -160.61077454358602,
+      "center_channel_evm_percent": 38.3820822136625,
+      "center_channel_snr_evm_db": 8.31742937295179,
+      "center_channel_evm_common_gain_db": -0.6329520261555832,
+      "center_channel_evm_common_phase_deg": -160.63500290790114
+    },
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 2048,
+      "seed": 20261104,
+      "step_m": 0.9765625,
+      "num_samples": 147456,
+      "elapsed_s": 5019.135685686022,
+      "center_channel_index": 28,
+      "center_freq_offset_hz": 0.0,
+      "signal_power_w": 9.82610866051364e-05,
+      "nli_power_w": 3.311743415395823e-05,
+      "nli_power_raw_w": 0.00034448878368787187,
+      "snr_nli_db": 4.723248809080136,
+      "common_gain_db": -1.7841574521779409,
+      "common_phase_deg": -157.66008355728857,
+      "center_channel_evm_percent": 62.08879564951366,
+      "center_channel_snr_evm_db": 4.139735283622532,
+      "center_channel_evm_common_gain_db": -1.7859836951114958,
+      "center_channel_evm_common_phase_deg": -157.59560684380176
+    }
+  ]
+}
