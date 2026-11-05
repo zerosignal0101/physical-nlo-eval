@@ -1,0 +1,232 @@
+{
+  "generated_by": "examples/check_dra_wideband_convergence.py --mode oversample",
+  "mode": "oversample",
+  "plan": "cl152",
+  "pump_model": "depleted",
+  "symbols": [
+    128
+  ],
+  "steps_m": [
+    0.244140625
+  ],
+  "sample_rate_factors": [
+    1,
+    2
+  ],
+  "seeds": [
+    20261104,
+    20261105
+  ],
+  "residual_definition": "analytic_snr_nli_db - waveform_snr_nli_db; positive means analytic is more optimistic",
+  "note": "2x oversample spectral-SNR diagnostic for pumped full-WDM references. Residual = analytic (hybrid_raman_paper) - waveform; positive means the analytic model is more optimistic. Only 2 seeds per (plan, config): this gives a same-seed alias-free comparison, not a converged absolute NLI. The known cl152 128-symbol seed scatter (4-seed sigma 5.08 dB) remains unresolved. Oversample mode fixes WIDEBAND_SEED=20261104; the 20261105 rows were produced with a runtime seed override, no source edits.",
+  "rows": [
+    {
+      "plan": "cl152",
+      "config": "bwd_sixpumps",
+      "pump_model": "depleted",
+      "num_symbols": 128,
+      "sample_rate_factor": 1,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "num_samples": 23040,
+      "elapsed_s": 2640.4274186482653,
+      "center_channel_index": 76,
+      "signal_power_w": 0.00022971896742423833,
+      "nli_power_w": 1.44609528918652e-07,
+      "snr_nli_db": 32.009999441234854,
+      "analytic_snr_nli_db": 30.708,
+      "residual_analytic_minus_waveform_db": -1.302
+    },
+    {
+      "plan": "cl152",
+      "config": "bwd_sixpumps",
+      "pump_model": "depleted",
+      "num_symbols": 128,
+      "sample_rate_factor": 2,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "elapsed_s": 5335.1406665937975,
+      "center_channel_index": 76,
+      "signal_power_w": 0.00022948291859108496,
+      "nli_power_w": 1.1475464613374998e-07,
+      "snr_nli_db": 33.00980086572383,
+      "analytic_snr_nli_db": 30.708,
+      "residual_analytic_minus_waveform_db": -2.3018
+    },
+    {
+      "plan": "cl152",
+      "config": "bwd_sixpumps",
+      "pump_model": "depleted",
+      "num_symbols": 128,
+      "sample_rate_factor": 1,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 23040,
+      "elapsed_s": 2635.670806128066,
+      "center_channel_index": 76,
+      "signal_power_w": 0.00023049457643836647,
+      "nli_power_w": 1.1607052096514329e-07,
+      "snr_nli_db": 32.979387771400454,
+      "analytic_snr_nli_db": 30.708,
+      "residual_analytic_minus_waveform_db": -2.2714
+    },
+    {
+      "plan": "cl152",
+      "config": "bwd_sixpumps",
+      "pump_model": "depleted",
+      "num_symbols": 128,
+      "sample_rate_factor": 2,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "elapsed_s": 5307.836269975174,
+      "center_channel_index": 76,
+      "signal_power_w": 0.0002303590718607235,
+      "nli_power_w": 8.663112278308284e-08,
+      "snr_nli_db": 34.24731376935165,
+      "analytic_snr_nli_db": 30.708,
+      "residual_analytic_minus_waveform_db": -3.5393
+    },
+    {
+      "plan": "cl152",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 128,
+      "sample_rate_factor": 1,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "num_samples": 23040,
+      "elapsed_s": 2164.309088188689,
+      "center_channel_index": 76,
+      "signal_power_w": 6.836158426953414e-05,
+      "nli_power_w": 9.935629265084243e-08,
+      "snr_nli_db": 28.376167408668344,
+      "analytic_snr_nli_db": 29.9,
+      "residual_analytic_minus_waveform_db": 1.5238
+    },
+    {
+      "plan": "cl152",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 128,
+      "sample_rate_factor": 2,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "elapsed_s": 4491.7255742070265,
+      "center_channel_index": 76,
+      "signal_power_w": 6.829313002126238e-05,
+      "nli_power_w": 8.287327392393441e-08,
+      "snr_nli_db": 29.159625217601793,
+      "analytic_snr_nli_db": 29.9,
+      "residual_analytic_minus_waveform_db": 0.7404
+    },
+    {
+      "plan": "cl152",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 128,
+      "sample_rate_factor": 1,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 23040,
+      "elapsed_s": 2153.582062778063,
+      "center_channel_index": 76,
+      "signal_power_w": 6.859801739228811e-05,
+      "nli_power_w": 1.2112255197460128e-07,
+      "snr_nli_db": 27.530865514271742,
+      "analytic_snr_nli_db": 29.9,
+      "residual_analytic_minus_waveform_db": 2.3691
+    },
+    {
+      "plan": "cl152",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 128,
+      "sample_rate_factor": 2,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "elapsed_s": 4404.621617955156,
+      "center_channel_index": 76,
+      "signal_power_w": 6.854530057416078e-05,
+      "nli_power_w": 1.0541166890739788e-07,
+      "snr_nli_db": 28.130889959100116,
+      "analytic_snr_nli_db": 29.9,
+      "residual_analytic_minus_waveform_db": 1.7691
+    }
+  ],
+  "same_seed_1x_to_2x_delta_db": [
+    {
+      "plan": "cl152",
+      "config": "bwd_sixpumps",
+      "seed": 20261104,
+      "snr_1x_db": 32.01,
+      "snr_2x_db": 33.0098,
+      "delta_2x_minus_1x_db": 0.9998
+    },
+    {
+      "plan": "cl152",
+      "config": "bwd_sixpumps",
+      "seed": 20261105,
+      "snr_1x_db": 32.9794,
+      "snr_2x_db": 34.2473,
+      "delta_2x_minus_1x_db": 1.2679
+    },
+    {
+      "plan": "cl152",
+      "config": "fwd_0p20w",
+      "seed": 20261104,
+      "snr_1x_db": 28.3762,
+      "snr_2x_db": 29.1596,
+      "delta_2x_minus_1x_db": 0.7835
+    },
+    {
+      "plan": "cl152",
+      "config": "fwd_0p20w",
+      "seed": 20261105,
+      "snr_1x_db": 27.5309,
+      "snr_2x_db": 28.1309,
+      "delta_2x_minus_1x_db": 0.6
+    }
+  ],
+  "seed_means": [
+    {
+      "plan": "cl152",
+      "config": "bwd_sixpumps",
+      "analytic_snr_nli_db": 30.708,
+      "n_seeds": 2,
+      "waveform_snr_1x_mean_db": 32.4947,
+      "residual_1x_mean_db": -1.7867,
+      "waveform_snr_1x_values_db": [
+        32.01,
+        32.9794
+      ],
+      "waveform_snr_2x_mean_db": 33.6286,
+      "residual_2x_mean_db": -2.9206,
+      "waveform_snr_2x_values_db": [
+        33.0098,
+        34.2473
+      ]
+    },
+    {
+      "plan": "cl152",
+      "config": "fwd_0p20w",
+      "analytic_snr_nli_db": 29.9,
+      "n_seeds": 2,
+      "waveform_snr_1x_mean_db": 27.9535,
+      "residual_1x_mean_db": 1.9465,
+      "waveform_snr_1x_values_db": [
+        28.3762,
+        27.5309
+      ],
+      "waveform_snr_2x_mean_db": 28.6453,
+      "residual_2x_mean_db": 1.2547,
+      "waveform_snr_2x_values_db": [
+        29.1596,
+        28.1309
+      ]
+    }
+  ]
+}

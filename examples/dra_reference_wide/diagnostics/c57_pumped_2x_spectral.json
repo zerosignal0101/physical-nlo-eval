@@ -1,0 +1,232 @@
+{
+  "generated_by": "examples/check_dra_wideband_convergence.py --mode oversample",
+  "mode": "oversample",
+  "plan": "c57",
+  "pump_model": "depleted",
+  "symbols": [
+    256
+  ],
+  "steps_m": [
+    0.48828125
+  ],
+  "sample_rate_factors": [
+    1,
+    2
+  ],
+  "seeds": [
+    20261104,
+    20261105
+  ],
+  "residual_definition": "analytic_snr_nli_db - waveform_snr_nli_db; positive means analytic is more optimistic",
+  "note": "2x oversample spectral-SNR diagnostic for pumped full-WDM references. Residual = analytic (hybrid_raman_paper) - waveform; positive means the analytic model is more optimistic. Only 2 seeds per (plan, config): this gives a same-seed alias-free comparison, not a converged absolute NLI. The known cl152 128-symbol seed scatter (4-seed sigma 5.08 dB) remains unresolved. Oversample mode fixes WIDEBAND_SEED=20261104; the 20261105 rows were produced with a runtime seed override, no source edits.",
+  "rows": [
+    {
+      "plan": "c57",
+      "config": "bwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 256,
+      "sample_rate_factor": 1,
+      "seed": 20261104,
+      "step_m": 0.48828125,
+      "num_samples": 18432,
+      "elapsed_s": 623.2719817389734,
+      "center_channel_index": 28,
+      "signal_power_w": 0.00040790523629304087,
+      "nli_power_w": 1.4902553912481398e-07,
+      "snr_nli_db": 34.37298578768254,
+      "analytic_snr_nli_db": 32.93,
+      "residual_analytic_minus_waveform_db": -1.443
+    },
+    {
+      "plan": "c57",
+      "config": "bwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 256,
+      "sample_rate_factor": 2,
+      "seed": 20261104,
+      "step_m": 0.48828125,
+      "num_samples": 36864,
+      "elapsed_s": 1715.078699296806,
+      "center_channel_index": 28,
+      "signal_power_w": 0.00040800015052781433,
+      "nli_power_w": 1.2303639777068548e-07,
+      "snr_nli_db": 35.20626715842031,
+      "analytic_snr_nli_db": 32.93,
+      "residual_analytic_minus_waveform_db": -2.2763
+    },
+    {
+      "plan": "c57",
+      "config": "bwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 256,
+      "sample_rate_factor": 1,
+      "seed": 20261105,
+      "step_m": 0.48828125,
+      "num_samples": 18432,
+      "elapsed_s": 608.8188328938559,
+      "center_channel_index": 28,
+      "signal_power_w": 0.00041090416132729085,
+      "nli_power_w": 2.3220814554321685e-07,
+      "snr_nli_db": 32.478630893665006,
+      "analytic_snr_nli_db": 32.93,
+      "residual_analytic_minus_waveform_db": 0.4514
+    },
+    {
+      "plan": "c57",
+      "config": "bwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 256,
+      "sample_rate_factor": 2,
+      "seed": 20261105,
+      "step_m": 0.48828125,
+      "num_samples": 36864,
+      "elapsed_s": 1701.7680392889306,
+      "center_channel_index": 28,
+      "signal_power_w": 0.0004107545224005434,
+      "nli_power_w": 2.0643089087491336e-07,
+      "snr_nli_db": 32.98807666893463,
+      "analytic_snr_nli_db": 32.93,
+      "residual_analytic_minus_waveform_db": -0.0581
+    },
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 256,
+      "sample_rate_factor": 1,
+      "seed": 20261104,
+      "step_m": 0.48828125,
+      "num_samples": 18432,
+      "elapsed_s": 617.1281389351934,
+      "center_channel_index": 28,
+      "signal_power_w": 0.00011223319384455736,
+      "nli_power_w": 1.502896416725964e-07,
+      "snr_nli_db": 28.731922729197574,
+      "analytic_snr_nli_db": 24.67,
+      "residual_analytic_minus_waveform_db": -4.0619
+    },
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 256,
+      "sample_rate_factor": 2,
+      "seed": 20261104,
+      "step_m": 0.48828125,
+      "num_samples": 36864,
+      "elapsed_s": 1764.2248566895723,
+      "center_channel_index": 28,
+      "signal_power_w": 0.00011226909127624387,
+      "nli_power_w": 1.3300525216800357e-07,
+      "snr_nli_db": 29.26391416500861,
+      "analytic_snr_nli_db": 24.67,
+      "residual_analytic_minus_waveform_db": -4.5939
+    },
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 256,
+      "sample_rate_factor": 1,
+      "seed": 20261105,
+      "step_m": 0.48828125,
+      "num_samples": 18432,
+      "elapsed_s": 608.5213130963966,
+      "center_channel_index": 28,
+      "signal_power_w": 0.00011313988305536375,
+      "nli_power_w": 2.2430731819501919e-07,
+      "snr_nli_db": 27.027722825070217,
+      "analytic_snr_nli_db": 24.67,
+      "residual_analytic_minus_waveform_db": -2.3577
+    },
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "pump_model": "depleted",
+      "num_symbols": 256,
+      "sample_rate_factor": 2,
+      "seed": 20261105,
+      "step_m": 0.48828125,
+      "num_samples": 36864,
+      "elapsed_s": 1839.6538696102798,
+      "center_channel_index": 28,
+      "signal_power_w": 0.00011304584131549256,
+      "nli_power_w": 2.0680545199918603e-07,
+      "snr_nli_db": 27.376926064751224,
+      "analytic_snr_nli_db": 24.67,
+      "residual_analytic_minus_waveform_db": -2.7069
+    }
+  ],
+  "same_seed_1x_to_2x_delta_db": [
+    {
+      "plan": "c57",
+      "config": "bwd_0p20w",
+      "seed": 20261104,
+      "snr_1x_db": 34.373,
+      "snr_2x_db": 35.2063,
+      "delta_2x_minus_1x_db": 0.8333
+    },
+    {
+      "plan": "c57",
+      "config": "bwd_0p20w",
+      "seed": 20261105,
+      "snr_1x_db": 32.4786,
+      "snr_2x_db": 32.9881,
+      "delta_2x_minus_1x_db": 0.5094
+    },
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "seed": 20261104,
+      "snr_1x_db": 28.7319,
+      "snr_2x_db": 29.2639,
+      "delta_2x_minus_1x_db": 0.532
+    },
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "seed": 20261105,
+      "snr_1x_db": 27.0277,
+      "snr_2x_db": 27.3769,
+      "delta_2x_minus_1x_db": 0.3492
+    }
+  ],
+  "seed_means": [
+    {
+      "plan": "c57",
+      "config": "bwd_0p20w",
+      "analytic_snr_nli_db": 32.93,
+      "n_seeds": 2,
+      "waveform_snr_1x_mean_db": 33.4258,
+      "residual_1x_mean_db": -0.4958,
+      "waveform_snr_1x_values_db": [
+        34.373,
+        32.4786
+      ],
+      "waveform_snr_2x_mean_db": 34.0972,
+      "residual_2x_mean_db": -1.1672,
+      "waveform_snr_2x_values_db": [
+        35.2063,
+        32.9881
+      ]
+    },
+    {
+      "plan": "c57",
+      "config": "fwd_0p20w",
+      "analytic_snr_nli_db": 24.67,
+      "n_seeds": 2,
+      "waveform_snr_1x_mean_db": 27.8798,
+      "residual_1x_mean_db": -3.2098,
+      "waveform_snr_1x_values_db": [
+        28.7319,
+        27.0277
+      ],
+      "waveform_snr_2x_mean_db": 28.3204,
+      "residual_2x_mean_db": -3.6504,
+      "waveform_snr_2x_values_db": [
+        29.2639,
+        27.3769
+      ]
+    }
+  ]
+}
