@@ -13,5 +13,7 @@
   "step_m": 0.244140625,
   "config": "fwd_0p20w",
   "elapsed_s": 281.0535672651604,
-  "num_samples": 4608
+  "num_samples": 4608,
+  "superseded_by": "c57_fwd_record_evm_gainfix_0p488.json",
+  "superseded_reason": "2026-11-05 fixed frequency-domain Raman gain application; these rows used time-domain gain modulation."
 }

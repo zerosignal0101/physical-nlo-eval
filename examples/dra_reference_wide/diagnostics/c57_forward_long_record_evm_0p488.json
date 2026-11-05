@@ -42,5 +42,7 @@
       "center_channel_evm_common_gain_db": -0.6329463968110594,
       "center_channel_evm_common_phase_deg": -160.63198113846343
     }
-  ]
+  ],
+  "superseded_by": "c57_fwd_record_evm_gainfix_0p488.json",
+  "superseded_reason": "2026-11-05 fixed frequency-domain Raman gain application; these rows used time-domain gain modulation."
 }

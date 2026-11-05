@@ -23,6 +23,10 @@
     # 快速冒烟
     PYTHONPATH=src python examples/check_dra_forward_record.py --symbols 64
 
+    # 2× 合波采样率（factor 必须是整数，且重采样比仍为整数）
+    PYTHONPATH=src python examples/check_dra_forward_record.py \
+        --symbols 512 --sample-rate-factor 2
+
 结果写 ``examples/dra_reference_wide/diagnostics/c57_forward_record_evm.json``；
 不修改主参考数据。
 """
@@ -31,7 +35,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import generate_dra_reference as generator
@@ -55,6 +61,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--pump-model", default="depleted")
     parser.add_argument(
+        "--sample-rate-factor",
+        type=int,
+        default=1,
+        help=(
+            "合波采样率相对计划默认值的整数倍 (默认 1)。用于混叠诊断；"
+            "必须保持重采样比为整数。"
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -66,8 +81,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _plan_for_symbols(base_plan, symbols: int, factor: int):
+    """构造指定符号数与采样率倍数的计划，并校验整数重采样比。"""
+    plan = base_plan.with_num_symbols(symbols)
+    if factor != 1:
+        plan = replace(plan, sample_rate_hz=base_plan.sample_rate_hz * factor)
+    ratio = plan.sample_rate_hz / plan.channel_sample_rate_hz
+    if not math.isclose(ratio, round(ratio), rel_tol=1e-9, abs_tol=0.0):
+        raise SystemExit(
+            f"sample-rate-factor {factor} gives a non-integer resample ratio "
+            f"{ratio:.12g} for plan {plan.name}"
+        )
+    return plan
+
+
 def _rows(args: argparse.Namespace) -> list[dict]:
     """对每个记录长度复用同一输入，逐配置传播并同时测频谱与 EVM。"""
+    if args.sample_rate_factor < 1:
+        raise SystemExit("sample-rate-factor must be a positive integer")
     base_plan = generator.WIDEBAND_PLANS[args.plan]
     available = generator.WIDEBAND_CONFIGS[args.plan]
     unknown = [name for name in args.configs if name not in available]
@@ -76,7 +107,7 @@ def _rows(args: argparse.Namespace) -> list[dict]:
 
     rows = []
     for symbols in args.symbols:
-        plan = base_plan.with_num_symbols(symbols)
+        plan = _plan_for_symbols(base_plan, symbols, args.sample_rate_factor)
         wdm_input, bits, constellation = generator.build_wideband_dataset(plan, args.seed)
         for config_name in args.configs:
             pumps = available[config_name]
@@ -104,7 +135,8 @@ def _rows(args: argparse.Namespace) -> list[dict]:
             rows.append(row)
             print(
                 f"{args.plan} {config_name} sym={symbols} seed={args.seed} "
-                f"dz={args.step_m:g}: snr_nli={row['snr_nli_db']:.4f} dB "
+                f"factor={args.sample_rate_factor} dz={args.step_m:g}: "
+                f"snr_nli={row['snr_nli_db']:.4f} dB "
                 f"snr_evm={row['center_channel_snr_evm_db']:.4f} dB "
                 f"({row['elapsed_s']:.1f}s)",
                 flush=True,
@@ -130,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         "pump_model": args.pump_model,
         "step_m": float(args.step_m),
         "seed": int(args.seed),
+        "sample_rate_factor": int(args.sample_rate_factor),
         "symbols": list(args.symbols),
         "evm_fiber_parameters": {
             "length_km": generator.WIDEBAND_FIBER_LENGTH_KM,
