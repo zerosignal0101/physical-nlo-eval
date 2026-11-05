@@ -7,8 +7,8 @@
 
 * ``snr_nli_db``：频带内 NLI 残差（``band_nli_metrics``），即现有
   校准口径；
-* ``center_channel_snr_evm_db``：接收机 EVM（demux → 公共增益对齐 →
-  CDC → RRC → EVM），即实际可测量的接收质量。
+* ``center_channel_snr_evm_db``：接收机 EVM（全带宽 CDC → demux →
+  公共增益对齐 → RRC → 盲定时 → EVM），即实际可测量的接收质量。
 
 若 EVM SNR 随记录长度稳定、而频谱 NLI 发散，说明发散来自频域
 估计器/短周期记录；若两者同步发散，则说明周期性记录的传播本身在
@@ -170,14 +170,14 @@ def main(argv: list[str] | None = None) -> int:
             "beta3_ps3_per_km": generator.WIDEBAND_BETA3_PS3_PER_KM,
             "sps": generator.WIDEBAND_PLANS[args.plan].sps,
             "roll_off": generator.WIDEBAND_PLANS[args.plan].roll_off,
-            "cdc_freq_scale": "n_full/(n_full-1), matching the full-band propagator",
+            "cdc_order": "wideband CDC before WDMDemux, on the propagator's n/(n-1) grid",
         },
         "note": (
             "snr_nli_db is the in-band residual after one complex common-gain "
             "projection; center_channel_snr_evm_db is the receiver EVM SNR after "
-            "demux -> common-gain alignment -> CDC -> matched RRC. Comparing their "
-            "record-length trends separates a spectral-estimator/periodic-record "
-            "artifact from a real propagation effect."
+            "wideband CDC -> demux -> common-gain alignment -> matched RRC. "
+            "Comparing their record-length trends separates a spectral-estimator/"
+            "periodic-record artifact from a real propagation effect."
         ),
         "rows": rows,
     }

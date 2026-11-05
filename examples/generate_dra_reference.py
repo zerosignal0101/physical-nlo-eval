@@ -57,6 +57,7 @@ from physics_nlo_eval.channel import (
 )
 from physics_nlo_eval.core.signal import Signal
 from physics_nlo_eval.dsp.time_domain import ChromaticDispersionComp
+from physics_nlo_eval.dsp.timing import blind_timing_recovery
 from physics_nlo_eval.metrics.ber_evm import BERCalculator
 from physics_nlo_eval.tx.mapper import Constellation, Mapper
 from physics_nlo_eval.tx.optics import IQModulator
@@ -451,20 +452,33 @@ def center_channel_evm(
     beta3_ps3_per_km: float = BETA3_PS3_PER_KM,
     sps: int = SPS,
     roll_off: float = ROLL_OFF,
-    cdc_freq_scale: float | None = None,
+    ignore_headers: int = 30,
 ) -> tuple[float, float, float, float]:
-    """对中心信道执行 demux → 公共相位对齐 → CDC → 匹配滤波 → EVM。
+    """对中心信道执行全带宽 CDC → demux → 公共相位对齐 → 匹配滤波 → EVM。
 
-    光纤参数默认取 3/5/7ch 历史口径；全 WDM 调用时必须传入
-    :data:`WIDEBAND_*` 参数，否则 CDC 会留下 ~8% 的残余色散。
+    色散补偿必须在 **demux 之前** 对全带宽记录做，并使用与传播器相同的
+    ``n/(n-1)`` 频率网格。若改成 demux 后再按信道样本补偿，信道自身的
+    绝对频偏 ``f_c`` 会留下一个线性相位（群延迟
+    ``τ = -β₂·ω_c·L``）和一个常数相位。cl152 的中心信道位于
+    ``f_c = +37.5 GHz``，τ ≈ 511 ps ≈ 32.7 symbol ≈ 131 个 256 GBd 样点，
+    直接把判决点打乱，EVM 饱和在 ``√2·100%``；c57 的中心信道 ``f_c = 0``，
+    所以旧路径只在 cl152 上出错。全带宽补偿同时消除了这两个相位项。
 
-    ``cdc_freq_scale`` 用于消除 CDC 的频率轴约定误差。传播器在**全带宽**
-    记录上使用 ``n_full/(n_full-1)`` 的 fftfreq 缩放，而 demux 后 CDC 只
-    看到 ``n_ch`` 个信道样本、内部按 ``n_ch/(n_ch-1)`` 缩放。短记录下两者
-    相差可达 0.4%，在 100 km 的 β₂ 相位上足以把 EVM 从 ~30 dB 压到
-    ~17 dB。全 WDM 调用应传入 ``n_full/(n_full-1)``；默认 ``None`` 保持
-    旧 3/5/7ch 行为不变。
+    光纤参数默认取 3/5/7ch 历史口径；全 WDM 调用必须传入
+    :data:`WIDEBAND_*` 参数。
+
+    RRC 匹配滤波后再做一次盲的分数样点定时恢复（恒模准则），吸收
+    demux/重采样链可能残留的亚样点延迟；在正确的全带宽 CDC 下残余
+    通常为 0。
     """
+    cdc = ChromaticDispersionComp(
+        fiber_length_km=fiber_length_km,
+        beta2_ps2_per_km=beta2_ps2_per_km,
+        beta3_ps3_per_km=beta3_ps3_per_km,
+    )
+    nonlinear_output = cdc.forward(nonlinear_output)
+    linear_output = cdc.forward(linear_output)
+
     # 理想矩形滤波避免短 FIR 在 27.5 GHz 截止处的边带失真。
     stacked_nl = WDMDemux(filter_type="ideal_rectangular").forward(nonlinear_output)
     stacked_lin = WDMDemux(filter_type="ideal_rectangular").forward(linear_output)
@@ -479,24 +493,11 @@ def center_channel_evm(
     aligned_data = channel_nl.data / common_gain
     channel_nl = Signal(data=aligned_data, ctx=channel_nl.ctx)
 
-    if cdc_freq_scale is not None:
-        n_channel_samples = int(channel_nl.data.shape[-1])
-        native_scale = (
-            n_channel_samples / (n_channel_samples - 1)
-            if n_channel_samples > 1
-            else 1.0
-        )
-        scale_ratio = cdc_freq_scale / native_scale
-        beta2_ps2_per_km = beta2_ps2_per_km * scale_ratio**2
-        beta3_ps3_per_km = beta3_ps3_per_km * scale_ratio**3
-
-    channel_nl = ChromaticDispersionComp(
-        fiber_length_km=fiber_length_km,
-        beta2_ps2_per_km=beta2_ps2_per_km,
-        beta3_ps3_per_km=beta3_ps3_per_km,
-    ).forward(channel_nl)
     channel_nl = RRCFilter(sps=sps, roll_off=roll_off, is_matched_filter=True).forward(channel_nl)
-    evm_percent = BERCalculator(ignore_headers=30).calculate_evm(channel_nl, constellation, tx_bits)
+    channel_nl = blind_timing_recovery(channel_nl, ignore_symbols=ignore_headers)
+    evm_percent = BERCalculator(ignore_headers=ignore_headers).calculate_evm(
+        channel_nl, constellation, tx_bits
+    )
     snr_db = float(20 * np.log10(100.0 / evm_percent)) if evm_percent > 0 else float("inf")
     return (
         float(evm_percent),
@@ -504,12 +505,6 @@ def center_channel_evm(
         float(20 * np.log10(np.abs(common_gain))),
         float(np.angle(common_gain, deg=True)),
     )
-
-
-def _full_band_cdc_freq_scale(wdm_input: Signal) -> float:
-    """全带宽传播器用的 fftfreq 缩放，供 demux 后的 CDC 抵消网格约定。"""
-    n_samples = int(wdm_input.data.shape[-1])
-    return n_samples / (n_samples - 1) if n_samples > 1 else 1.0
 
 
 def make_fiber(
@@ -759,7 +754,6 @@ def wideband_center_channel_metrics(
             beta3_ps3_per_km=WIDEBAND_BETA3_PS3_PER_KM,
             sps=plan.sps,
             roll_off=plan.roll_off,
-            cdc_freq_scale=_full_band_cdc_freq_scale(wdm_input),
         )
         metrics.update(
             {
@@ -943,7 +937,6 @@ def generate_wideband_plan(
             beta3_ps3_per_km=WIDEBAND_BETA3_PS3_PER_KM,
             sps=plan.sps,
             roll_off=plan.roll_off,
-            cdc_freq_scale=_full_band_cdc_freq_scale(wdm_input),
         )
         evm_metrics[config_name] = {
             "center_channel_evm_percent": evm_percent,
