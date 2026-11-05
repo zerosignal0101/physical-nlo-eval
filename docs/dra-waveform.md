@@ -755,6 +755,43 @@ C 或 C+L 全 WDM。数据在 `examples/dra_reference_wide/`，不覆盖旧目�
   `docs/dra-ensemble.md` 与
   `examples/dra_reference_wide/diagnostics/cl152_nopump_2x_ensemble*.json`。
 
+**泵浦配置的 2× 采样率对照（2026-11-05 新增）。** 用同一 seed、同一步长，
+把 `fwd_0p20w` / `bwd_*` 也做 1×/2× 对照（`--mode oversample`），
+可以在扣掉混叠偏差后检查解析残差。c57 为 256 symbols、0.488 m；
+cl152 为 128 symbols、0.244 m。解析值仍为 hybrid（c57 bwd 32.930、
+fwd 24.670；cl152 bwd 30.708、fwd 29.900 dB），残差 = 解析 − 波形：
+
+| 计划 | 配置 | seed | 1× SNR | 2× SNR | 1×→2× | 2× 残差 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| c57 | `bwd_0p20w` | 20261104 | 34.373 | 35.206 | +0.83 | **−2.28** |
+| c57 | `bwd_0p20w` | 20261105 | 32.479 | 32.988 | +0.51 | **−0.06** |
+| c57 | `fwd_0p20w` | 20261104 | 28.732 | 29.264 | +0.53 | **−4.59** |
+| c57 | `fwd_0p20w` | 20261105 | 27.028 | 27.377 | +0.35 | **−2.71** |
+| cl152 | `bwd_sixpumps` | 20261104 | 32.010 | 33.010 | +1.00 | **−2.30** |
+| cl152 | `bwd_sixpumps` | 20261105 | 32.979 | 34.247 | +1.27 | **−3.54** |
+| cl152 | `fwd_0p20w` | 20261104 | 28.376 | 29.160 | +0.78 | **+0.74** |
+| cl152 | `fwd_0p20w` | 20261105 | 27.531 | 28.131 | +0.60 | **+1.77** |
+
+- 同 seed 的 1×→2× 偏差在泵浦下**不是常数**：cl152 bwd 为
+  +1.00/+1.27 dB，与 nopump 的 +1.3…+1.4 dB 接近；但 cl152 fwd 只有
+  +0.60/+0.78 dB。c57 同样如此：bwd +0.51/+0.83 dB 接近 nopump 的
+  +0.89 dB（256 sym、seed 20261104），fwd 仅 +0.35/+0.53 dB。
+  强前向增益下 1× 高估 NLI 的幅度明显小于 nopump，不能直接把
+  nopump 的 ~1.4 dB 混叠修正套到前向。
+- 2× 残差（两 seed 均值）：c57 bwd **−1.17**（单 seed −2.28/−0.06）、
+  c57 fwd **−3.65**（−4.59/−2.71）；cl152 bwd **−2.92**（−2.30/−3.54）、
+  cl152 fwd **+1.26**（+0.74/+1.77）。因此 alias-free 下 c57 bwd 在
+  ±1.5 dB 内；c57 fwd 仍约 −3.7 dB（解析保守），单 seed 可达 −4.6 dB；
+  cl152 bwd 的均值已超出 ±1.5 dB，cl152 fwd 均值在 ±1.5 dB 内，但
+  seed 20261105 达 +1.77 dB。旧的 cl152 alias-free 外推 −2.7/+0.1 dB
+  作废，见 §12.3。
+- **这不是收敛估计**：每个 (计划, 配置) 只有 2 个 seed，2× 只去掉混叠，
+  不解决统计散布。cl152 已知的 128-symbol nopump 4-seed 标准差
+  **5.08 dB** 仍然存在；本批泵浦 2× 单 seed 残差也已跨 1–2 dB。
+  这些数字只能作为**同 seed 的 alias-free 锚点**，不能当作绝对 NLI 或
+  0.1 dB 级基准。原始数据见
+  `examples/dra_reference_wide/diagnostics/{c57,cl152}_pumped_2x_spectral.json`。
+
 #### 12.2.2 记录长度与 seed 集成：绝对 NLI 有 1–2 dB 统计散布
 
 步长探针用 64 symbols 足以判断**步长趋势**，但不足以给出**绝对 NLI**。
@@ -936,6 +973,10 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
 | cl152 | 2×、128 sym、0.244 m、2 seed 均值 | 33.874 | 32.765 | **−1.109** |
 | cl152 | 2×、128 sym、0.244 m、4 seed 均值 | 30.587 | 32.765 | **+2.178** |
 | cl152 | 2×、128 sym、0.244 m、4 seed 中位数 | 32.462 | 32.765 | +0.303 |
+| c57 | 2×、256 sym、`bwd_0p20w`、2 seed 均值 | 34.097 | 32.930 | **−1.167** |
+| c57 | 2×、256 sym、`fwd_0p20w`、2 seed 均值 | 28.320 | 24.670 | **−3.650** |
+| cl152 | 2×、128 sym、0.244 m、`bwd_sixpumps`、2 seed 均值 | 33.629 | 30.708 | **−2.921** |
+| cl152 | 2×、128 sym、0.244 m、`fwd_0p20w`、2 seed 均值 | 28.645 | 29.900 | **+1.255** |
 | cl152 | 1×、64 sym、0.122 m 探针（单次） | 34.679 | 32.765 | −1.914 |
 | cl152 | 2×、64 sym、0.244 m 探针（4 seed 中最大） | 35.635 | 32.765 | −2.870 |
 
@@ -962,7 +1003,8 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
   （0.177 dB），统计上仍需更多 seed/更长记录才能把调制项压到 1 dB
   以内。152ch 的绝对 nopump 残差按 4-seed 中位数约 +0.3 dB，按均值
   +2.2 dB，不再引用 −1.1 dB 这个 2-seed 值。
-- 因此：**57ch 的 nopump 与 backward 在 ~1–1.5 dB 内与解析一致；
+- 因此：**57ch 的 nopump 与 backward 的两 seed 均值在 ~1.2 dB 内与
+  解析一致（2× bwd 均值 −1.17 dB；单 seed 可到 −2.28 dB）；
   152ch 的 2-seed −1.1 dB 已被 4-seed 数据推翻（中位数 +0.3 dB、
   均值 +2.2 dB，单次实现散布数 dB），只能报“~±2 dB 量级、统计未
   收敛”。64-symbol 探针只能看同 seed 的步长趋势，不能给绝对 NLI。**
@@ -971,8 +1013,16 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
   （解析保守），后向两 seed 均值 33.43 dB 对 32.930 dB 为 **−0.50 dB**。
   cl152 1× 128-symbol 的修正值为 nopump 32.473 (+0.29)、bwd 32.010
   (−1.30)、fwd 28.376 (+1.52 dB)；旧 bwd 29.720/fwd 16.146 作废。
-  1× 数据仍含约 1.4 dB 混叠偏差，alias-free 的 bwd/fwd 残差约为
-  −2.7/+0.1 dB（外推，2× 泵浦数据待生成）。
+  1× 数据仍含混叠偏差（同 seed 1×→2×：cl152 bwd +1.0/+1.3、
+  fwd +0.6/+0.8 dB；c57 bwd +0.5/+0.8、fwd +0.35/+0.53 dB）。
+  实测 2× alias-free 残差为 cl152 bwd **−2.92 dB**（两 seed 均值；
+  单 seed −2.30/−3.54，已超出 ±1.5 dB）、fwd **+1.26 dB**
+  （+0.74/+1.77，均值在 ±1.5 dB 内、seed 20261105 略超）；c57 为
+  bwd **−1.17 dB**（±1.5 dB 内；单 seed −2.28/−0.06）、fwd
+  **−3.65 dB**（单 seed −4.59/−2.71）。旧的 cl152 alias-free 外推
+  −2.7/+0.1 dB **作废**：它套用了 nopump 的 ~1.4 dB 混叠偏差，但
+  泵浦 fwd 的同 seed 1×→2× 偏差实际只有 +0.6…+0.8 dB，因此
+  alias-free 的 fwd 残差仍是约 +1.3 dB，而不是 +0.1 dB。
   前向残差随信道数增大（3ch +0.54、5ch +0.25、7ch −1.01、57ch −3.21 dB），
   是泵浦耗尽驱动/强前向增益 GN 适用域的新开放问题。
 
@@ -1016,6 +1066,17 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
   64-symbol 4-seed 标准差 5.56 dB，128-symbol 4-seed 标准差
   **5.08 dB**（2-seed 的 0.53 dB 不可用）。绝对 NLI 必须用 128-symbol
   （或更长）多 seed 集成；64-symbol 只用于同 seed 的步长趋势。
+- **2× 泵浦诊断（2026-11-05）**：c57 `bwd_0p20w`/`fwd_0p20w` 与
+  cl152 `bwd_sixpumps`/`fwd_0p20w` 各做了 2 个 seed 的同 seed 1×/2×
+  对照（c57 256 sym、0.488 m；cl152 128 sym、0.244 m），结果见
+  `diagnostics/{c57,cl152}_pumped_2x_spectral.json`。alias-free（2×）
+  两 seed 均值残差：c57 bwd −1.17、fwd −3.65；cl152 bwd −2.92、
+  fwd +1.26 dB。2× 只去掉混叠，**不解决 seed 散布**：每个配置只有
+  2 个 seed，单 seed 残差已跨 1–2 dB；cl152 已知 nopump 128-symbol
+  4-seed 标准差 5.08 dB，泵浦配置没有理由更小。因此这些值只能作为
+  同 seed 的 alias-free 锚点，不能当作收敛的绝对 NLI。fwd 在强增益下
+  的 1×→2× 偏差较小（cl152 +0.60…+0.78、c57 +0.35…+0.53 dB），
+  不能套用 nopump 的 ~1.4 dB 修正。
 - **调制口径**：波形是恒模 DP-QPSK，GN 假设高斯；cl152 2× 128-symbol
   4-seed 的配对 NLI 比为 +1.47 ± 5.70 dB（中位数 +2.42 dB），
   c57 2× 256-symbol 为 +4.70 ± 3.09 dB。旧的 7.0 dB 单次探针未收敛、
@@ -1113,4 +1174,24 @@ PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
     examples/check_dra_wideband_convergence.py --plan c57 --mode record \
     --config nopump --steps 0.48828125 --symbols 64 128 256 512 \
     --seeds 20261104 20261105
+```
+
+泵浦配置的 1×/2× 同 seed 对照（§12.2.1/§12.3）用同一脚本复现。
+注意：`oversample` 模式目前固定使用 `WIDEBAND_SEED=20261104`，不读取
+`--seeds`；seed 20261105 的行是在导入生成器后覆盖
+`generate_dra_reference.WIDEBAND_SEED` 得到的（未改源码）：
+
+```bash
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_wideband_convergence.py --plan cl152 --mode oversample \
+    --config fwd_0p20w --steps 0.244140625 --symbols 128 --factors 1 2
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_wideband_convergence.py --plan cl152 --mode oversample \
+    --config bwd_sixpumps --steps 0.244140625 --symbols 128 --factors 1 2
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_wideband_convergence.py --plan c57 --mode oversample \
+    --config fwd_0p20w --steps 0.48828125 --symbols 256 --factors 1 2
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/check_dra_wideband_convergence.py --plan c57 --mode oversample \
+    --config bwd_0p20w --steps 0.48828125 --symbols 256 --factors 1 2
 ```
