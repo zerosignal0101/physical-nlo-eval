@@ -1,0 +1,255 @@
+{
+  "schema_version": 1,
+  "generated_by": "examples/check_dra_modulation.py",
+  "plan": {
+    "name": "cl152",
+    "n_channels": 152,
+    "channel_spacing_hz": 75000000000.0,
+    "center_frequency_hz": 190150000000000.0,
+    "symbol_rate_hz": 64000000000.0,
+    "roll_off": 0.1,
+    "sps": 4,
+    "sample_rate_hz": 11520000000000.0,
+    "channel_sample_rate_hz": 256000000000.0,
+    "resample_ratio": 45,
+    "launch_power_dbm_per_pol": 0.0,
+    "num_symbols": 128,
+    "samples_per_channel": 512,
+    "occupied_bandwidth_hz": 70400000000.0,
+    "first_channel_offset_hz": -5662500000000.0,
+    "last_channel_offset_hz": 5662500000000.0
+  },
+  "config": "nopump",
+  "pump_model": "depleted",
+  "sample_rate_factor": 1,
+  "sample_rate_hz": 11520000000000.0,
+  "resample_ratio": 45,
+  "num_symbols": 128,
+  "step_m": 0.244140625,
+  "step_m_values": [
+    0.244140625
+  ],
+  "nli_analysis_bandwidth_hz": 64000000000.0,
+  "modulations": [
+    "gaussian",
+    "qpsk"
+  ],
+  "seeds": [
+    20261104,
+    20261105
+  ],
+  "qpsk_self_check": {
+    "all_bit_exact": true,
+    "max_abs_diff": 0.0
+  },
+  "modulation_summary": {
+    "gaussian": {
+      "snr_nli_db": {
+        "mean": 27.928762585001586,
+        "std": 2.3488350038460584,
+        "min": 26.267885425893706,
+        "max": 29.589639744109462,
+        "n": 2
+      },
+      "nli_power_w": {
+        "mean": 8.170042235452976e-08,
+        "std": 4.2894145965542806e-08,
+        "min": 5.136968086908886e-08,
+        "max": 1.1203116383997068e-07,
+        "n": 2
+      },
+      "signal_power_w": {
+        "mean": 4.708809430894122e-05,
+        "std": 4.949988624719349e-07,
+        "min": 4.6738077256607685e-05,
+        "max": 4.743811136127475e-05,
+        "n": 2
+      }
+    },
+    "qpsk": {
+      "snr_nli_db": {
+        "mean": 32.72029427260553,
+        "std": 0.3496708264742533,
+        "min": 32.47303966002248,
+        "max": 32.96754888518858,
+        "n": 2
+      },
+      "nli_power_w": {
+        "mean": 2.5468515879239498e-08,
+        "std": 1.9833264073037353e-09,
+        "min": 2.4066092327328674e-08,
+        "max": 2.687093943115032e-08,
+        "n": 2
+      },
+      "signal_power_w": {
+        "mean": 4.757451332617129e-05,
+        "std": 1.2189418679384505e-07,
+        "min": 4.7488321120102145e-05,
+        "max": 4.766070553224044e-05,
+        "n": 2
+      }
+    }
+  },
+  "nli_ratio_db_summary": {
+    "mean": 4.746786434399008,
+    "std": 2.0559462601861616,
+    "min": 3.2930128920662503,
+    "max": 6.200559976731764,
+    "n": 2
+  },
+  "comparisons": [
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "sample_rate_factor": 1,
+      "resample_ratio": 45,
+      "num_symbols": 128,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "qpsk_snr_nli_db": 32.47303966002248,
+      "gaussian_snr_nli_db": 26.267885425893706,
+      "delta_snr_db": -6.2051542341287735,
+      "nli_ratio_db": 6.200559976731764,
+      "signal_power_ratio_db": -0.004594257397011219,
+      "qpsk_nli_power_w": 2.687093943115032e-08,
+      "gaussian_nli_power_w": 1.1203116383997068e-07
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "sample_rate_factor": 1,
+      "resample_ratio": 45,
+      "num_symbols": 128,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "qpsk_snr_nli_db": 32.96754888518858,
+      "gaussian_snr_nli_db": 29.589639744109462,
+      "delta_snr_db": -3.3779091410791153,
+      "nli_ratio_db": 3.2930128920662503,
+      "signal_power_ratio_db": -0.08489624901286326,
+      "qpsk_nli_power_w": 2.4066092327328674e-08,
+      "gaussian_nli_power_w": 5.136968086908886e-08
+    }
+  ],
+  "rows": [
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "gaussian",
+      "sample_rate_factor": 1,
+      "resample_ratio": 45,
+      "num_symbols": 128,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "num_samples": 23040,
+      "channel_power_mean_w": 0.0009999998923588625,
+      "channel_power_rel_spread": 2.718921066956681e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.743811136127475e-05,
+      "nli_power_w": 1.1203116383997068e-07,
+      "nli_power_raw_w": 5.8366568112062564e-05,
+      "snr_nli_db": 26.267885425893706,
+      "common_gain_db": -0.007547687096779478,
+      "common_phase_deg": 67.35155281998983,
+      "elapsed_s": 1671.1301735742018,
+      "qpsk_self_check": {
+        "bit_exact": null,
+        "max_abs_diff": null
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "qpsk",
+      "sample_rate_factor": 1,
+      "resample_ratio": 45,
+      "num_symbols": 128,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "num_samples": 23040,
+      "channel_power_mean_w": 0.0009999998923603945,
+      "channel_power_rel_spread": 2.9925267397533164e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.7488321120102145e-05,
+      "nli_power_w": 2.687093943115032e-08,
+      "nli_power_raw_w": 5.7893933418385055e-05,
+      "snr_nli_db": 32.47303966002248,
+      "common_gain_db": 0.0011418618504390858,
+      "common_phase_deg": 67.02694855140471,
+      "elapsed_s": 1672.9714663140476,
+      "qpsk_self_check": {
+        "bit_exact": true,
+        "max_abs_diff": 0.0,
+        "num_samples": 23040
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "gaussian",
+      "sample_rate_factor": 1,
+      "resample_ratio": 45,
+      "num_symbols": 128,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 23040,
+      "channel_power_mean_w": 0.000999999888698176,
+      "channel_power_rel_spread": 3.310029904032268e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.6738077256607685e-05,
+      "nli_power_w": 5.136968086908886e-08,
+      "nli_power_raw_w": 5.771853302172293e-05,
+      "snr_nli_db": 29.589639744109462,
+      "common_gain_db": -0.010525514320745276,
+      "common_phase_deg": 67.47097253657547,
+      "elapsed_s": 1672.7997279954143,
+      "qpsk_self_check": {
+        "bit_exact": null,
+        "max_abs_diff": null
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "qpsk",
+      "sample_rate_factor": 1,
+      "resample_ratio": 45,
+      "num_symbols": 128,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 23040,
+      "channel_power_mean_w": 0.0009999998822517806,
+      "channel_power_rel_spread": 3.0752467694559043e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.766070553224044e-05,
+      "nli_power_w": 2.4066092327328674e-08,
+      "nli_power_raw_w": 5.835233188739097e-05,
+      "snr_nli_db": 32.96754888518858,
+      "common_gain_db": -0.0012035018012961102,
+      "common_phase_deg": 67.1783304059392,
+      "elapsed_s": 1673.788187975064,
+      "qpsk_self_check": {
+        "bit_exact": true,
+        "max_abs_diff": 0.0,
+        "num_samples": 23040
+      }
+    }
+  ],
+  "notes": [
+    "Both modulations use the same RRC (sps, roll_off) and IQ launch power; only the symbol distribution differs.",
+    "Gaussian symbols are per-polarisation complex normal, power-normalised on the finite record to unit per-pol power before RRC/IQ.",
+    "nli_ratio_db = 10*log10(NLI_gaussian / NLI_qpsk); delta_snr_db = SNR_gaussian - SNR_qpsk. A positive nli_ratio_db means the Gaussian control produces more NLI.",
+    "This is a nopump comparison unless config is a pumped one; pumped modulation spacing may differ and must not be extrapolated.",
+    "Single-realisation NLI has 1-2 dB scatter; quote multi-seed means, not one seed."
+  ]
+}

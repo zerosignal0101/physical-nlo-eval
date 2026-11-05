@@ -1,0 +1,401 @@
+{
+  "schema_version": 1,
+  "generated_by": "examples/check_dra_modulation.py",
+  "plan": {
+    "name": "cl152",
+    "n_channels": 152,
+    "channel_spacing_hz": 75000000000.0,
+    "center_frequency_hz": 190150000000000.0,
+    "symbol_rate_hz": 64000000000.0,
+    "roll_off": 0.1,
+    "sps": 4,
+    "sample_rate_hz": 23040000000000.0,
+    "channel_sample_rate_hz": 256000000000.0,
+    "resample_ratio": 90,
+    "launch_power_dbm_per_pol": 0.0,
+    "num_symbols": 128,
+    "samples_per_channel": 512,
+    "occupied_bandwidth_hz": 70400000000.0,
+    "first_channel_offset_hz": -5662500000000.0,
+    "last_channel_offset_hz": 5662500000000.0
+  },
+  "config": "nopump",
+  "pump_model": "depleted",
+  "sample_rate_factor": 2,
+  "sample_rate_hz": 23040000000000.0,
+  "resample_ratio": 90,
+  "num_symbols": 128,
+  "step_m": 0.244140625,
+  "step_m_values": [
+    0.244140625
+  ],
+  "nli_analysis_bandwidth_hz": 64000000000.0,
+  "modulations": [
+    "gaussian",
+    "qpsk"
+  ],
+  "seeds": [
+    20261104,
+    20261105,
+    20261106,
+    20261107
+  ],
+  "qpsk_self_check": {
+    "all_bit_exact": true,
+    "max_abs_diff": 0.0
+  },
+  "modulation_summary": {
+    "gaussian": {
+      "snr_nli_db": {
+        "mean": 29.09719882724178,
+        "std": 1.9108372628878936,
+        "min": 26.3484747643753,
+        "max": 30.631624894347155,
+        "n": 4
+      },
+      "nli_power_w": {
+        "mean": 6.301170387560782e-08,
+        "std": 3.186596745444017e-08,
+        "min": 4.078212990629639e-08,
+        "max": 1.0991340133797197e-07,
+        "n": 4
+      },
+      "signal_power_w": {
+        "mean": 4.72047682892825e-05,
+        "std": 2.986536067972925e-07,
+        "min": 4.679710851101949e-05,
+        "max": 4.744252605316267e-05,
+        "n": 4
+      }
+    },
+    "qpsk": {
+      "snr_nli_db": {
+        "mean": 30.587258276883382,
+        "std": 5.082086382817963,
+        "min": 23.177979571600712,
+        "max": 34.247206705331294,
+        "n": 4
+      },
+      "nli_power_w": {
+        "mean": 7.531560943254023e-08,
+        "std": 1.020330245318172e-07,
+        "min": 1.7912221141268843e-08,
+        "max": 2.2800271563040904e-07,
+        "n": 4
+      },
+      "signal_power_w": {
+        "mean": 4.7467102167747174e-05,
+        "std": 1.0985465574691372e-07,
+        "min": 4.7395594687037633e-05,
+        "max": 4.7628851894958796e-05,
+        "n": 4
+      }
+    }
+  },
+  "nli_ratio_db_summary": {
+    "mean": 1.4659343233284685,
+    "std": 5.695293377235145,
+    "min": -6.130477076712904,
+    "max": 7.150314076755996,
+    "n": 4
+  },
+  "comparisons": [
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "qpsk_snr_nli_db": 33.501498764523426,
+      "gaussian_snr_nli_db": 26.3484747643753,
+      "delta_snr_db": -7.153024000148125,
+      "nli_ratio_db": 7.150314076755996,
+      "signal_power_ratio_db": -0.002709923392134432,
+      "qpsk_nli_power_w": 2.1184549839660564e-08,
+      "gaussian_nli_power_w": 1.0991340133797197e-07
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "qpsk_snr_nli_db": 34.247206705331294,
+      "gaussian_snr_nli_db": 30.095940722960318,
+      "delta_snr_db": -4.151265982370976,
+      "nli_ratio_db": 4.074755051887938,
+      "signal_power_ratio_db": -0.07651093048303892,
+      "qpsk_nli_power_w": 1.7912221141268843e-08,
+      "gaussian_nli_power_w": 4.577464106369317e-08
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261106,
+      "step_m": 0.244140625,
+      "qpsk_snr_nli_db": 23.177979571600712,
+      "gaussian_snr_nli_db": 29.312754927284338,
+      "delta_snr_db": 6.134775355683626,
+      "nli_ratio_db": -6.130477076712904,
+      "signal_power_ratio_db": 0.004298278970724164,
+      "qpsk_nli_power_w": 2.2800271563040904e-07,
+      "gaussian_nli_power_w": 5.5576643194469776e-08
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261107,
+      "step_m": 0.244140625,
+      "qpsk_snr_nli_db": 31.422348066078094,
+      "gaussian_snr_nli_db": 30.631624894347155,
+      "delta_snr_db": -0.7907231717309386,
+      "nli_ratio_db": 0.7691452413828442,
+      "signal_power_ratio_db": -0.021577930348092564,
+      "qpsk_nli_power_w": 3.416295111882246e-08,
+      "gaussian_nli_power_w": 4.078212990629639e-08
+    }
+  ],
+  "rows": [
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "gaussian",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "channel_power_mean_w": 0.0009999998923588625,
+      "channel_power_rel_spread": 2.718921066956681e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.7413075152059856e-05,
+      "nli_power_w": 1.0991340133797197e-07,
+      "nli_power_raw_w": 5.8298502144039426e-05,
+      "snr_nli_db": 26.3484747643753,
+      "common_gain_db": -0.009346886841487944,
+      "common_phase_deg": 67.3188915724947,
+      "elapsed_s": 4628.717060205061,
+      "qpsk_self_check": {
+        "bit_exact": null,
+        "max_abs_diff": null
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "qpsk",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261104,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "channel_power_mean_w": 0.0009999998923603945,
+      "channel_power_rel_spread": 2.9925267397533164e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.7442669333338935e-05,
+      "nli_power_w": 2.1184549839660564e-08,
+      "nli_power_raw_w": 5.7892254236753903e-05,
+      "snr_nli_db": 33.501498764523426,
+      "common_gain_db": -0.0018903648521739341,
+      "common_phase_deg": 67.04829705556048,
+      "elapsed_s": 4479.885639435146,
+      "qpsk_self_check": {
+        "bit_exact": true,
+        "max_abs_diff": 0.0,
+        "num_samples": 46080
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "gaussian",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "channel_power_mean_w": 0.000999999888698176,
+      "channel_power_rel_spread": 3.310029904032268e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.679710851101949e-05,
+      "nli_power_w": 4.577464106369317e-08,
+      "nli_power_raw_w": 5.7707770584969106e-05,
+      "snr_nli_db": 30.095940722960318,
+      "common_gain_db": -0.00470757235255222,
+      "common_phase_deg": 67.44028923421773,
+      "elapsed_s": 4428.74226812087,
+      "qpsk_self_check": {
+        "bit_exact": null,
+        "max_abs_diff": null
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "qpsk",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "channel_power_mean_w": 0.0009999998822517806,
+      "channel_power_rel_spread": 3.0752467694559043e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.7628851894958796e-05,
+      "nli_power_w": 1.7912221141268843e-08,
+      "nli_power_raw_w": 5.826027268109961e-05,
+      "snr_nli_db": 34.247206705331294,
+      "common_gain_db": -0.0029852828910277313,
+      "common_phase_deg": 67.13499024736124,
+      "elapsed_s": 4592.218774965033,
+      "qpsk_self_check": {
+        "bit_exact": true,
+        "max_abs_diff": 0.0,
+        "num_samples": 46080
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "gaussian",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261106,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "channel_power_mean_w": 0.000999999899836952,
+      "channel_power_rel_spread": 3.250004018346975e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.744252605316267e-05,
+      "nli_power_w": 5.5576643194469776e-08,
+      "nli_power_raw_w": 5.8465166548032523e-05,
+      "snr_nli_db": 29.312754927284338,
+      "common_gain_db": -0.008257430372524448,
+      "common_phase_deg": 67.40085935344726,
+      "elapsed_s": 3913.32537992578,
+      "qpsk_self_check": {
+        "bit_exact": null,
+        "max_abs_diff": null
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "qpsk",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261106,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "channel_power_mean_w": 0.0009999998956637284,
+      "channel_power_rel_spread": 3.00565473903316e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.7395594687037633e-05,
+      "nli_power_w": 2.2800271563040904e-07,
+      "nli_power_raw_w": 5.825094919429034e-05,
+      "snr_nli_db": 23.177979571600712,
+      "common_gain_db": -0.021747345939357038,
+      "common_phase_deg": 67.26503044525234,
+      "elapsed_s": 3912.961105417926,
+      "qpsk_self_check": {
+        "bit_exact": true,
+        "max_abs_diff": 0.0,
+        "num_samples": 46080
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "gaussian",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261107,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "channel_power_mean_w": 0.0009999998949986142,
+      "channel_power_rel_spread": 2.9353768399054593e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.716636344088797e-05,
+      "nli_power_w": 4.078212990629639e-08,
+      "nli_power_raw_w": 5.810594760344404e-05,
+      "snr_nli_db": 30.631624894347155,
+      "common_gain_db": -0.0039051312641634446,
+      "common_phase_deg": 67.4053824472161,
+      "elapsed_s": 3940.176861997228,
+      "qpsk_self_check": {
+        "bit_exact": null,
+        "max_abs_diff": null
+      }
+    },
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "modulation": "qpsk",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261107,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "channel_power_mean_w": 0.000999999886425665,
+      "channel_power_rel_spread": 2.9842337115011716e-07,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.740129275565332e-05,
+      "nli_power_w": 3.416295111882246e-08,
+      "nli_power_raw_w": 5.788829004281472e-05,
+      "snr_nli_db": 31.422348066078094,
+      "common_gain_db": -0.0024222148201934633,
+      "common_phase_deg": 67.078398870833,
+      "elapsed_s": 3922.188571287319,
+      "qpsk_self_check": {
+        "bit_exact": true,
+        "max_abs_diff": 0.0,
+        "num_samples": 46080
+      }
+    }
+  ],
+  "notes": [
+    "Both modulations use the same RRC (sps, roll_off) and IQ launch power; only the symbol distribution differs.",
+    "Gaussian symbols are per-polarisation complex normal, power-normalised on the finite record to unit per-pol power before RRC/IQ.",
+    "nli_ratio_db = 10*log10(NLI_gaussian / NLI_qpsk); delta_snr_db = SNR_gaussian - SNR_qpsk. A positive nli_ratio_db means the Gaussian control produces more NLI.",
+    "This is a nopump comparison unless config is a pumped one; pumped modulation spacing may differ and must not be extrapolated.",
+    "Single-realisation NLI has 1-2 dB scatter; quote multi-seed means, not one seed."
+  ]
+}
