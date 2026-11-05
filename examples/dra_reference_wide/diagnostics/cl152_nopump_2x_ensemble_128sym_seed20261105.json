@@ -1,0 +1,55 @@
+{
+  "generated_by": "examples/check_dra_cl152_ensemble.py",
+  "plan": "cl152",
+  "config": "nopump",
+  "pump_model": "depleted",
+  "sample_rate_factor": 2,
+  "sample_rate_hz": 23040000000000.0,
+  "resample_ratio": 90,
+  "num_symbols": 128,
+  "step_m": 0.244140625,
+  "note": "Alias-free (2x) cl152 nopump center-channel ensemble. Full-WDM waveform NLI has a 2-3 dB single-realization scatter; quote the mean over seeds and the sample std, not a single realization. 4 seeds give a rough mean but a sub-dB confidence interval needs more seeds. Each row is an independent random symbol record propagated at the same step.",
+  "summary": {
+    "count": 1,
+    "seeds": [
+      20261105
+    ],
+    "snr_nli_db": {
+      "mean": 34.247206705331294,
+      "std": null,
+      "min": 34.247206705331294,
+      "max": 34.247206705331294,
+      "n": 1
+    },
+    "nli_power_w": {
+      "mean": 1.7912221141268843e-08,
+      "std": null,
+      "min": 1.7912221141268843e-08,
+      "max": 1.7912221141268843e-08,
+      "n": 1
+    },
+    "snr_nli_db_range": null
+  },
+  "rows": [
+    {
+      "plan": "cl152",
+      "config": "nopump",
+      "pump_model": "depleted",
+      "sample_rate_factor": 2,
+      "resample_ratio": 90,
+      "num_symbols": 128,
+      "seed": 20261105,
+      "step_m": 0.244140625,
+      "num_samples": 46080,
+      "elapsed_s": 4767.546895103063,
+      "center_channel_index": 76,
+      "center_freq_offset_hz": 37500000000.0,
+      "signal_power_w": 4.7628851894958796e-05,
+      "nli_power_w": 1.7912221141268843e-08,
+      "nli_power_raw_w": 5.826027268109961e-05,
+      "snr_nli_db": 34.247206705331294,
+      "common_gain_db": -0.0029852828910277313,
+      "common_phase_deg": 67.13499024736124
+    }
+  ]
+}
