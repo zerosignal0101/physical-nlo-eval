@@ -314,8 +314,10 @@ class FiberChannel(BaseBlock):
             可选的逐 SSFM 步幅度增益钩子，签名为
             ``step_gain(z_center_m, dz_m, omega_rad_per_s) -> amplitude_factor``。
             用于分布式拉曼放大等需要在每一步施加频率相关增益的场景。
-            为 None 时行为与原始回退路径逐位一致。增益率按步中点取值，
-            并在非线性前后各施加一半；因此要求 ``dz`` 远小于增益剖面变化尺度。
+            为 None 时行为与原始回退路径逐位一致。增益是频率域线性算符，
+            按 ``omega_rad_per_s`` 逐频点给出，并与色散一起乘在频谱上；
+            非线性前后各施加半程（对称分步）。增益率按步中点取值，因此
+            要求 ``dz`` 远小于增益剖面变化尺度。
 
         Notes
         -----
@@ -370,19 +372,22 @@ class FiberChannel(BaseBlock):
 
         rng = np.random.default_rng()
         for step in range(n_steps):
-            data = np.fft.ifft(np.fft.fft(data, axis=-1) * half_linear, axis=-1)
             step_gain_factor = None
             if step_gain is not None:
-                # 分布式增益作为线性算符在非线性前后各施加一半（对称分步）。
+                # 分布式增益是频率域线性算符，必须和色散一起乘在频谱上；
+                # 逐样本乘在时域会给 CW 输入引入与记录长度相关的虚假幅度
+                # 调制（增益谱被映射到时间轴）。对称分步：前后各半程，
+                # 非线性只夹在中间。
                 z_center = (step + 0.5) * dz
                 step_gain_factor = np.sqrt(step_gain(z_center, dz, omega))[None, :]
-                data *= step_gain_factor
+            half_linear_gain = (
+                half_linear if step_gain_factor is None else half_linear * step_gain_factor
+            )
+            data = np.fft.ifft(np.fft.fft(data, axis=-1) * half_linear_gain, axis=-1)
             power = np.sum(np.abs(data) ** 2, axis=0)
             if raman is not None:
                 power = np.real(np.fft.ifft(np.fft.fft(power) * np.fft.fft(raman))) / n_samples
             data *= np.exp(1j * (8 / 9) * center_gamma * nonlinear_length * power)[None, :]
-            if step_gain_factor is not None:
-                data *= step_gain_factor
             if self.d_pmd_ps_per_sqrt_km > 0:
                 theta = np.arcsin(np.sqrt(rng.random()))
                 phi, psi = 2 * np.pi * rng.random(2)
@@ -397,7 +402,7 @@ class FiberChannel(BaseBlock):
                 spectrum[0] *= np.exp(-0.5j * omega * dgd)
                 spectrum[1] *= np.exp(0.5j * omega * dgd)
                 data = np.fft.ifft(spectrum, axis=-1)
-            data = np.fft.ifft(np.fft.fft(data, axis=-1) * half_linear, axis=-1)
+            data = np.fft.ifft(np.fft.fft(data, axis=-1) * half_linear_gain, axis=-1)
 
         ctx = opt_signal.ctx.copy()
         ctx.n_pol = 2

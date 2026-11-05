@@ -128,9 +128,16 @@ Gaussian 近似完全一致，因此两者的频率形状可以直接对照。�
   的 Manakov 传播器。
 - **无泵逐位一致**：`pumps=None` 时不传增益回调，执行路径与
   `FiberChannel._forward_numpy` 完全相同，输出数组逐位相等。
-- **增益施加位置**：每个 SSFM 步的增益率在步中点取值，并在非线性前后各
-  施加一半幅度增益（对称分步）。当 `coarse_step_size_m=500 m`、泵浦衰减
-  尺度约 20 km 时，步内泵浦功率变化小于 2.5%，中点近似误差可忽略。
+- **增益施加位置**：每个 SSFM 步的增益率在步中点取值；增益是频率域线性
+  算符（`step_gain(z, dz, ω)` 按 `ω` 逐频点返回），与色散一起乘在频谱上，
+  非线性前后各施加半程幅度增益（对称分步）。**2026-11-05 修正**：旧实现
+  把这个频变因子逐样本乘在时域，等价于把增益谱映射到时间轴，会给 CW 输入
+  引入约 1% 的虚假幅度起伏；该起伏在非线性与线性参考中同时存在，频谱 NLI
+  差分会部分抵消，但接收机 EVM 会完整暴露它，并随记录长度变化。修正后
+  零色散 CW 输出严格平坦（`tests/test_distributed_raman.py` 的
+  `test_frequency_dependent_gain_is_applied_in_frequency_domain`）。
+  当 `coarse_step_size_m=500 m`、泵浦衰减尺度约 20 km 时，步内泵浦功率
+  变化小于 2.5%，中点近似误差可忽略。
 - **频率轴**：与现有 NumPy 路径一致，采用
   `fftfreq(n, 1/fs) · n/(n−1)` 的 PyNLO inclusive-span 约定。
 - **相位/幅度**：增益只改变幅度；色散、损耗、Kerr 的相位处理保持不变。
@@ -598,19 +605,24 @@ PYTHONPATH=src python examples/check_dra_step_convergence.py
 
 | 量 | SNR_NLI (dB) | 相对波形残差 |
 | --- | ---: | ---: |
-| 波形（耗尽，62.5 m） | 22.384 | — |
-| 解析 hybrid（`pump_depletion=True`） | 23.387 | +1.003 |
-| 解析 H3（`pump_depletion=True`） | 23.583 | +1.199 |
-| `numerical_dra`（耗尽） | 23.334 | +0.950 |
+| 波形（耗尽，62.5 m） | 24.399 | — |
+| 解析 hybrid（`pump_depletion=True`） | 23.387 | −1.012 |
+| 解析 H3（`pump_depletion=True`） | 23.583 | −0.816 |
+| `numerical_dra`（耗尽） | 23.334 | −1.065 |
 
-残差定义为“解析 − 波形”，正值表示解析更乐观。机器可读结果在
+残差定义为“解析 − 波形”，负值表示解析更保守。机器可读结果在
 `examples/dra_reference_converged/depleted_7ch_compare.json`。
 
-- 历史 500 m 耗尽波形的同一场景为 20.280 dB（用同一输入与耗尽模型重跑），
-  62.5 m 为 22.384 dB，**步长修正 +2.10 dB**；相对 hybrid 的残差从 +3.11 dB
-  降到 **+1.00 dB**，H3 从 +3.30 dB 降到 +1.20 dB。
-- 剩余 ~1.0–1.2 dB 与 3ch/5ch 前向场景的 0.7–1.3 dB 同量级，属于强前向
-  增益下单信道 SPM 积累的 GN 适用域边界，而不是步长或泵浦口径问题。
+> **2026-11-05 修正**：旧表使用把频变增益逐样本乘在时域的波形，7ch 前向
+> 0.2 W 的 62.5 m 结果为 22.384 dB、残差 +1.00/+1.20 dB（解析更乐观）。
+> 修正增益施加方式后波形 NLI 下降 2.02 dB，残差反号。后向/无泵参考几乎
+> 不变（3ch 后向 0.002 dB、无泵逐位相同），见 §3 的增益施加说明。
+
+- 历史 500 m 耗尽波形的同一场景为 21.328 dB（用同一输入与耗尽模型重跑），
+  62.5 m 为 24.399 dB，**步长修正 +3.07 dB**；相对 hybrid 的残差从 +2.06 dB
+  降到 **−1.01 dB**，H3 从 +2.26 dB 降到 −0.82 dB。
+- 剩余 ~0.8–1.1 dB 与前向场景的 GN 适用域边界同量级，但方向变为解析
+  保守；这不是步长或泵浦口径问题。
 - H3 只比 hybrid 多乐观 0.20 dB，与 WP4 的 0.1–0.3 dB 结论一致。
 
 ### 11.6 验证与质量门
@@ -750,82 +762,45 @@ C 或 C+L 全 WDM。数据在 `examples/dra_reference_wide/`，不覆盖旧目�
   单次 256-symbol 实现的散布约 ±1–2 dB，远大于 3/5/7ch 的
   0.3–0.5 dB。全 WDM 的波形残差必须用多 seed 集成，不能拿单次
   实现做 0.1 dB 级比较。
-- 前向泵的记录长度依赖更严重：c57 `fwd_0p20w`、0.488 m，
-  64/128/256/512 symbols 的中心 SNR 为
-  **26.78 / 23.50 / 20.13 / 14.15 dB**（NLI 随记录长度持续增长，
-  512 symbols 仍未饱和）。因此 **57ch 前向泵的 256-symbol 波形不能
-  用作绝对校准**；网络侧对照里的 +4.5 dB 残差是记录长度依赖，
-  不能当作模型物理解释。后向泵/无泵没有这个单调发散，但同样受
-  ±1–1.5 dB 的 seed 散布影响。
+- **前向泵的记录长度依赖是增益施加 bug，已在 2026-11-05 修正**：
+  旧实现把频变拉曼增益逐样本乘在时域，使增益谱映射到时间轴，产生
+  随记录长度变化的虚假幅度/NLI。修正后 c57 `fwd_0p20w`、0.488 m、
+  seed 20261104 的中心 SNR 为 64/128/256/512/1024 symbols =
+  **26.93 / 26.91 / 28.73 / 27.95 / 27.41 dB**（EVM 25.97 / 26.11 /
+  28.35 / 27.73 / 27.25 dB），没有单调发散。旧值
+  26.78/23.50/20.13/14.15 dB（64→512）与 EVM 22.44→13.65 dB 已作废，
+  对应的 `c57_forward_record_evm.json`、`c57_forward_long_record_*`
+  在 JSON 中标记为 superseded。
+- 后向泵同样受该 bug 影响（57ch 全带宽内增益谱变化约 5 dB，时间域
+  调制不可忽略）：c57 `bwd_0p20w` 两 seed 中心 SNR 从
+  32.22/30.68 dB 修正为 **34.37/32.48 dB**；3ch 窄带（200 GHz）内
+  增益近似平坦，后向只变化 0.002 dB。无泵逐位不变。
 - 64-symbol 步长探针的 `snr_nli_db` 只用于比较相邻步长；主数据的
   `per_channel` 用 128/256 symbols，仍建议多 seed 复算。
 
-**EVM 对照：前向发散在接收波形里真实存在，不是纯频谱估计器伪影。**
+**EVM 对照与修正后的前向参考。**
 
 `examples/check_dra_forward_record.py` 在同一批 0.488 m、seed 20261104
-的波形上同时测频谱 NLI（`snr_nli_db`）和接收机 EVM SNR
-（demux → 公共增益对齐 → CDC → RRC → EVM）。EVM 的 CDC 使用全带宽
-记录的 `n_full/(n_full-1)` fftfreq 缩放，与传播器一致：
+的 c57 波形上同时测频谱 NLI（`snr_nli_db`）和接收机 EVM SNR
+（demux → 公共增益对齐 → CDC → RRC → EVM）。修正后两者在
+0.4–0.5 dB 内一致，且不随记录长度发散：
 
-| symbols | nopump 频谱 (dB) | nopump EVM (dB) | fwd 频谱 (dB) | fwd EVM (dB) | fwd 频谱−EVM (dB) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 64 | 32.370 | 29.843 | 26.784 | 22.436 | 4.35 |
-| 128 | 32.825 | 30.671 | 23.500 | 20.406 | 3.09 |
-| 256 | 34.588 | 33.295 | 20.131 | 18.590 | 1.54 |
-| 512 | 33.722 | 32.949 | 14.154 | 13.652 | 0.50 |
+| symbols | fwd 频谱 (dB) | fwd EVM (dB) | nopump EVM (dB) |
+| ---: | ---: | ---: | ---: |
+| 64 | 26.928 | 25.972 | 29.843 |
+| 128 | 26.914 | 26.110 | 30.671 |
+| 256 | 28.732 | 28.346 | 33.295 |
+| 512 | 27.947 | 27.726 | 32.949 |
+| 1024 | 27.413 | 27.252 | 32.683 |
 
-- **nopump**：EVM 与频谱同步，四点分别在 32.4–34.6 / 29.8–33.3 dB
-  区间内非单调散布，没有记录长度发散。这验证了 EVM 口径本身没有
-  随记录长度漂移的系统误差。
-- **前向泵**：频谱与 EVM **同时单调下降**。EVM 从 22.44 降到
-  13.65 dB（−8.79 dB），频谱从 26.78 降到 14.15 dB（−12.63 dB）。
-  到 512 symbols 两者只差 0.50 dB。这说明记录长度依赖存在于**传播后
-  的实际接收波形**中，而不是只由频谱 NLI 的拟合估计器制造；因此
-  **是有限周期记录的传播伪影（NLI 随记录长度继续积累/未饱和），
-  不能归因于频谱估计器**。
-- 频谱估计器仍有二次放大：64 symbols 时频谱比 EVM 悲观 4.35 dB，
-  因为单一复增益拟合在短记录上吸收了部分 NLI；随记录变长该差距
-  收敛到 0.5 dB。结论是“真实发散 + 短记录低估”两者叠加，而不是
-  单一估计器伪影。
-- 因此 **EVM 不能把前向泵救回绝对校准**：512-symbol 前向 EVM 仍有
-  20.8% 误差、SNR 13.65 dB，且未饱和。长记录延伸（见下）证实
-  2048 symbols 仍在下降；前向泵仍只能给趋势/相对比较，绝对 NLI
-  需要非周期传播器。EVM 作为独立审计指标保留。
-
-**长记录延伸：超过走离仍不饱和，长记录前向参考不可行。**
-
-把 `fwd_0p20w` 延伸到 1024/2048 symbols（0.977 m，seed 20261104），
-并在 1024 symbols 用 0.488 m 复算，同时给出 nopump 同记录长度控制：
-
-| symbols | 步长 (m) | fwd 频谱 (dB) | fwd EVM (dB) | nopump 频谱 (dB) | nopump EVM (dB) |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 512 | 0.488 | 14.153 | 13.652 | 33.722 | 32.948 |
-| 512 | 0.977 | — | — | 33.722 | 32.948 |
-| 1024 | 0.488 | 8.660 | 8.318 | — | — |
-| 1024 | 0.977 | 8.660 | 8.317 | 33.232 | 32.683 |
-| 2048 | 0.977 | 4.723 | 4.140 | 33.529 | 33.135 |
-| 2048 | 0.488 | 未运行 | 未运行 | — | — |
-
-- **步长对照通过**：1024 symbols 的 0.488/0.977 m 结果在
-  0.0001 dB 内一致（EVM 8.3175 vs 8.3174 dB，频谱均为 8.6602 dB）。
-  c57 在 0.488 m 已收敛，因此 0.977 m 的 1024/2048 延伸可直接与
-  0.488 m 的 512 点拼接；既有 256-symbol fwd 的 0.977 m 频谱
-  20.1306 dB 也与 0.488 m 的 20.1307 dB 一致。
-- **不饱和**：前向 EVM 从 512 的 13.65 dB 继续降到 1024 的 8.32 dB、
-  2048 的 4.14 dB。`EVM(2048) − EVM(1024) = −4.18 dB`，远大于
-  0.5 dB 的饱和阈值。记录长度 2048 symbols 已超过 c57 的信道间
-  走离（≈1832 symbols），但 EVM 仍在陡降，**走离不是饱和点**；
-  下降在 512→1024→2048 仍约 4–5 dB/倍长度。
-- **nopump 控制**：同一步长 0.977 m 下 512/1024/2048 的 EVM 为
-  32.95/32.68/33.14 dB，三点非单调、跨度 0.46 dB，没有记录长度
-  发散。这再次确认下降是前向泵特有的，而不是 EVM/CDC 口径或
-  频谱估计器随记录长度的系统误差。
-- **结论**：长记录前向参考**不可行**。2048 symbols 的 fwd EVM 只有
-  4.14 dB（62.1% EVM），且仍在下降；把记录拉长到超过走离并不能
-  得到收敛值。**57ch 前向泵的绝对校准需要 channelized/aperiodic
-  传播器**（或按记录长度外推到无穷的模型），不能靠加长周期性记录
-  实现。前向泵数据仍只能用于趋势/相对比较，EVM 作为独立审计指标
-  保留。
+修正后的 256-symbol 主参考（`c57.json` / `c57_seed20261105.json`）：
+前向中心 SNR **28.732 / 27.028 dB**（EVM 28.35 / 26.49 dB），后向
+**34.373 / 32.479 dB**。前向两 seed 均值 27.88 dB，与解析 hybrid
+24.670 dB 的残差为 **−3.21 dB**（解析保守）；后向两 seed 均值
+33.43 dB 对解析 32.930 dB 的残差为 **−0.50 dB**。前向的负残差随
+信道数增大（3ch +0.54、5ch +0.25、7ch −1.01、57ch −3.21 dB），
+是新的开放问题（泵浦耗尽驱动/强前向增益 GN 适用域），不能用旧的
+“周期记录伪影”解释。详见 `docs/dra-open-issues.md` §1.1 与 §5。
 
 走离判据（`2π·Δf_max·|β2|·dz·Rs`）：
 
@@ -901,7 +876,15 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
   收敛的高斯控制 + 更多 128-symbol seed。
 - 因此：**57ch/152ch 的 nopump 与 backward 在 ~1–1.5 dB 内与解析一致
   （152ch 的 128-symbol 2× 均值 −1.1 dB）；64-symbol 探针只能看同 seed
-  的步长趋势，不能给绝对 NLI。forward 不可用（记录长度伪影）。**
+  的步长趋势，不能给绝对 NLI。** 修正增益施加后，前向也可以进入绝对
+  对照：c57 前向两 seed 均值 27.88 dB 对解析 24.670 dB 为 **−3.21 dB**
+  （解析保守），后向两 seed 均值 33.43 dB 对 32.930 dB 为 **−0.50 dB**。
+  cl152 1× 128-symbol 的修正值为 nopump 32.473 (+0.29)、bwd 32.010
+  (−1.30)、fwd 28.376 (+1.52 dB)；旧 bwd 29.720/fwd 16.146 作废。
+  1× 数据仍含约 1.4 dB 混叠偏差，alias-free 的 bwd/fwd 残差约为
+  −2.7/+0.1 dB（外推，2× 泵浦数据待生成）。
+  前向残差随信道数增大（3ch +0.54、5ch +0.25、7ch −1.01、57ch −3.21 dB），
+  是泵浦耗尽驱动/强前向增益 GN 适用域的新开放问题。
 
 ### 12.4 限制
 
@@ -915,19 +898,15 @@ n2 与 A_eff；`symbol_rate_hz=64e9`、
   NLI 统计散布远大于 3/5/7ch：c57 nopump 64/128/256/512 symbols 与
   两个 256-symbol seed 的均值为 33.24 dB、标准差 0.90 dB。单次实现
   不能用于 0.1–0.2 dB 级比较；需要多 seed 集成。
-- **前向泵记录长度依赖（EVM 已证实，长记录仍不饱和）**：c57
-  `fwd_0p20w` 的频谱 NLI 随记录长度持续增长（64→512 symbols，
-  26.78→14.15 dB）；同一批波形的接收机 EVM SNR 也从 22.44 降到
-  13.65 dB。延伸到 2048 symbols（0.977 m，与 0.488 m 在 1024
-  symbols 对照到 0.0001 dB）后，EVM 继续降到 1024 的 8.32 dB、
-  2048 的 4.14 dB，`EVM(2048) − EVM(1024) = −4.18 dB`，远超
-  0.5 dB 的饱和阈值。2048 symbols 已超过 c57 信道间走离
-  （≈1832 symbols），但没有饱和迹象；nopump 同长度控制
-  （32.95/32.68/33.14 dB）非单调、跨度 0.46 dB，确认该发散是前向
-  泵特有。因此 **长记录周期性前向参考不可行**：57ch 前向泵的绝对
-  校准需要 channelized/aperiodic 传播器；256/512/2048-symbol 的
-  前向波形都只能用于趋势/相对比较。短记录（64 symbols）的频谱比
-  EVM 悲观 4.35 dB，是单复增益拟合吸收部分 NLI 的二次效应。
+- **前向泵记录长度（已修正）**：旧实现把频变增益乘在时域，导致
+  c57 `fwd_0p20w` 的频谱 NLI 与 EVM 随记录长度单调下降；2026-11-05
+  改为频域施加后，64→1024 symbols 的频谱 SNR 为
+  26.93/26.91/28.73/27.95/27.41 dB，无单调发散（EVM 同步）。
+  修正后的前向主参考（256 symbols）为 28.732/27.028 dB（两 seed），
+  解析 hybrid 残差 −3.21 dB（解析保守）。旧 `c57_forward_record_evm`
+  与 `c57_forward_long_record_*` 诊断已标记 superseded，不能再引用。
+  前向的负残差随信道数增大（3ch +0.54 → 57ch −3.21 dB），是当前
+  最大的开放口径问题，见 `docs/dra-open-issues.md` §1.1/§5。
 - **EVM 的 CDC 频率网格口径**：全 WDM 的传播器在全带宽记录上按
   `n_full/(n_full-1)` 缩放 fftfreq，demux 后 CDC 默认按信道样本
   `n_ch/(n_ch-1)` 缩放。短记录下两者相差 ~0.4%，在 100 km 的 β₂
@@ -987,21 +966,17 @@ PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
 PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
     examples/check_dra_forward_record.py
 
-# 4b) 长记录延伸（0.977 m）：1024/2048 symbols
+# 4b) 修正后的前向记录长度诊断（0.488 m）：64/128/256/512/1024 symbols
+#     2026-11-05 之前的结果使用旧时域增益实现，已标记 superseded。
 PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
-    examples/check_dra_forward_record.py --symbols 1024 2048 \
-    --configs fwd_0p20w --step-m 0.9765625 \
-    --output examples/dra_reference_wide/diagnostics/c57_forward_long_record_evm_0p977.json
-# 1024-symbol 步长对照（0.488 m）
-PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
-    examples/check_dra_forward_record.py --symbols 1024 \
+    examples/check_dra_forward_record.py --symbols 64 128 256 512 1024 \
     --configs fwd_0p20w --step-m 0.48828125 \
-    --output examples/dra_reference_wide/diagnostics/c57_forward_long_record_evm_0p488.json
-# nopump 同长度控制（0.977 m）
+    --output examples/dra_reference_wide/diagnostics/c57_fwd_record_evm_gainfix_0p488.json
+
+# 2× 采样率混叠检查（可选）
 PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
-    examples/check_dra_forward_record.py --symbols 512 1024 2048 \
-    --configs nopump --step-m 0.9765625 \
-    --output examples/dra_reference_wide/diagnostics/c57_nopump_long_record_evm_0p977.json
+    examples/check_dra_forward_record.py --symbols 256 \
+    --configs fwd_0p20w --step-m 0.48828125 --sample-rate-factor 2
 
 # 5) 质量门
 PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python -m pytest tests/test_distributed_raman.py -q
