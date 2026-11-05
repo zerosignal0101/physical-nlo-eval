@@ -62,7 +62,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         nargs="+",
         default=[generator.WIDEBAND_SEED],
-        help="随机种子 (仅 record 模式)",
+        help="随机种子 (oversample 与 record 模式)",
     )
     parser.add_argument("--pump-model", default="depleted")
     parser.add_argument(
@@ -86,10 +86,11 @@ def _rows(args: argparse.Namespace) -> list[dict]:
 
     if args.mode == "oversample":
         combinations = [
-            (symbols, factor, generator.WIDEBAND_SEED, step)
+            (symbols, factor, seed, step)
             for step in args.steps
             for symbols in args.symbols
             for factor in args.factors
+            for seed in args.seeds
         ]
     else:
         combinations = [
