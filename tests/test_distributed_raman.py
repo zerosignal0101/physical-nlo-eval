@@ -536,6 +536,201 @@ def test_band_average_changes_wideband_pump_residual_for_both_directions() -> No
         assert residuals["band_average"] / residuals["center"] > 1.05
 
 
+def test_pump_pump_raman_requires_depleted_model() -> None:
+    """泵浦-泵浦转移只对耗尽模型有定义；未耗尽时必须显式报错而不是静默忽略。"""
+    with pytest.raises(ValueError, match="depleted"):
+        DistributedRamanFiber(
+            pumps=[PumpSpec(1360.0, 0.2, "forward"), PumpSpec(1450.0, 0.2, "forward")],
+            pump_pump_raman=True,
+            **_fiber_kwargs(),
+        )
+
+
+def test_pump_pump_default_off_reproduces_committed_depleted_waveform() -> None:
+    """``pump_pump_raman=False``（缺省）必须逐位复现已提交的耗尽参考波形。"""
+    metadata = json.loads(
+        (REFERENCE_DIR / "dra_reference_depleted.json").read_text(encoding="utf-8")
+    )
+    generator = _load_generator()
+    tag = "3ch"
+    wdm_input, _, _ = generator.build_wdm_dataset(
+        tag,
+        generator.DATASETS[tag],
+        int(metadata["signal"]["num_symbols"]),
+        int(metadata["signal"]["seed"]),
+    )
+    fiber = generator.make_fiber(
+        generator.CONFIGS["fwd_0p20w"], nonlinear=True, pump_model="depleted"
+    )
+    assert fiber.pump_pump_raman is False
+    output = fiber.forward(wdm_input)
+    assert output.ctx.meta["dra_pump_pump_raman"] is False
+    with np.load(REFERENCE_DIR / "dra_reference_depleted.npz") as arrays:
+        assert np.array_equal(output.data, arrays[f"nl_{tag}_fwd_0p20w"])
+
+    balance = output.ctx.meta["dra_pump_energy_balance"]
+    for pump in balance["pumps"]:
+        assert pump["pump_pump_sent_w"] == 0.0
+        assert pump["pump_pump_received_w"] == 0.0
+        assert pump["pump_pump_net_w"] == 0.0
+    assert balance["pump_pump_net_total_w"] == 0.0
+    assert "no pump-pump Raman transfer" in output.ctx.meta["dra_pump_model_detail"]
+
+
+def test_pump_pump_default_off_matches_explicit_off_for_six_backward_pumps() -> None:
+    """六泵后向配置下，缺省与显式 False 的波形/剖面必须逐位相同。"""
+    generator = _load_generator()
+    pumps = generator.WIDEBAND_CONFIGS["cl152"]["bwd_sixpumps"]
+    signal = _signal(n_samples=512, sample_rate_hz=100e9, center_freq_hz=190.15e12)
+    common = {
+        "nonlinear": True,
+        "pump_model": "depleted",
+        "coarse_step_m": 100.0,
+    }
+    default = generator.make_wideband_fiber(pumps, pump_pump_raman=False, **common)
+    default.depleted_step_m = 100.0
+    explicit = generator.make_wideband_fiber(pumps, **common)
+    explicit.depleted_step_m = 100.0
+    default_out = default.forward(signal)
+    explicit_out = explicit.forward(signal)
+
+    assert np.array_equal(default_out.data, explicit_out.data)
+    assert np.array_equal(default._depleted_pump_power, explicit._depleted_pump_power)
+    assert np.array_equal(default._depleted_signal_power, explicit._depleted_signal_power)
+    # 6 个泵都已耦合，打开开关必须改变结果，否则测试没有意义。
+    enabled = generator.make_wideband_fiber(pumps, pump_pump_raman=True, **common)
+    enabled.depleted_step_m = 100.0
+    enabled_out = enabled.forward(signal)
+    assert not np.array_equal(default_out.data, enabled_out.data)
+
+
+def _two_pump_profiles(
+    wavelengths_nm: tuple[float, float],
+    powers_w: tuple[float, float],
+    *,
+    pump_pump_raman: bool,
+    step_m: float = 50.0,
+    alpha_db_per_km: float = 0.2,
+    input_power_w: float = 1e-25,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """跑两个前向泵 + 极弱信号的耗尽剖面，返回 (泵浦剖面, z, 能量账)。"""
+    pumps = [
+        PumpSpec(wavelength, power, "forward", alpha_db_per_km)
+        for wavelength, power in zip(wavelengths_nm, powers_w, strict=True)
+    ]
+    fiber = DistributedRamanFiber(
+        pumps=pumps,
+        pump_model="depleted",
+        pump_pump_raman=pump_pump_raman,
+        depleted_step_m=step_m,
+        **_fiber_kwargs(length_m=80e3, alpha_db_per_km=alpha_db_per_km),
+    )
+    z, profile, _, diagnostics = fiber._solve_depleted_profiles(
+        input_power_w, c / 1550e-9
+    )
+    return profile, z, diagnostics
+
+
+def test_pump_pump_two_pump_transfer_direction_and_energy_balance() -> None:
+    """短波长泵把功率交给长波长泵；每个泵的能量账必须闭合。
+
+    用 1360/1445 nm（频差 13.4 THz，正落在拉曼峰上）作为强耦合对，另用
+    任务示例里的 1340/1505 nm（频差 24.5 THz，Gaussian 谱翼 ≈7e-7）验证
+    符号方向在弱耦合下同样成立。
+    """
+    for wavelengths, powers in (((1360.0, 1445.0), (0.63, 0.165)), ((1340.0, 1505.0), (0.63, 0.075))):
+        reference, _, _ = _two_pump_profiles(wavelengths, powers, pump_pump_raman=False)
+        with_pp, _, diagnostics = _two_pump_profiles(wavelengths, powers, pump_pump_raman=True)
+        # 高频（短波长）泵失去功率，低频（长波长）泵获得功率。
+        assert with_pp[0, -1] < reference[0, -1]
+        assert with_pp[1, -1] > reference[1, -1]
+
+        for pump in diagnostics["pumps"]:
+            assert pump["pump_pump_sent_w"] >= 0.0
+            assert pump["pump_pump_received_w"] >= 0.0
+            balance = (
+                pump["launch_power_w"]
+                - pump["residual_power_w"]
+                - pump["passive_loss_w"]
+                - pump["transferred_to_signal_w"]
+                + pump["pump_pump_net_w"]
+            )
+            # 剩余项只有 RK4/梯形积分的离散误差；误差尺度跟总功率（而非单个
+            # 泵的标称功率）走，所以按最大标称功率给容差。
+            assert abs(balance) < 1e-4 * max(powers)
+            assert np.isclose(
+                pump["pump_pump_net_w"],
+                pump["pump_pump_received_w"] - pump["pump_pump_sent_w"],
+                rtol=1e-12,
+                atol=1e-18,
+            )
+        # 全局：净收益为负，差额以声子能量离开光场。
+        assert diagnostics["pump_pump_net_total_w"] < 0.0
+        assert np.isclose(
+            diagnostics["pump_pump_net_total_w"],
+            sum(pump["pump_pump_net_w"] for pump in diagnostics["pumps"]),
+            rtol=1e-12,
+            atol=1e-18,
+        )
+
+
+def test_pump_pump_conserves_pump_photons_and_step_size() -> None:
+    """无光纤损耗时成对光子数守恒，且残余功率对 RK4 步长不敏感。"""
+    wavelengths, powers = (1360.0, 1445.0), (0.63, 0.165)
+    frequencies = np.array([c / (w * 1e-9) for w in wavelengths])
+    residuals = {}
+    for step_m in (200.0, 100.0, 50.0):
+        profile, z, diagnostics = _two_pump_profiles(
+            wavelengths, powers, pump_pump_raman=True, step_m=step_m, alpha_db_per_km=0.0
+        )
+        assert diagnostics["converged"] is True
+        photons_launch = float(np.sum(profile[:, 0] / frequencies))
+        photons_end = float(np.sum(profile[:, -1] / frequencies))
+        # 弱信号（1e-25 W）带走的忽略不计，剩余为不动点/RK4 误差。
+        assert abs(photons_end - photons_launch) / photons_launch < 1e-6
+        residuals[step_m] = profile[:, -1]
+    # 100 m 与 50 m 的残余功率差应远小于功率转移本身。
+    assert np.max(np.abs(residuals[100.0] - residuals[50.0])) < 1e-9
+
+
+def test_pump_pump_six_backward_pumps_converge_and_move_power() -> None:
+    """六泵后向：开关打开后不动点仍收敛，功率从短波长泵流向长波长泵。"""
+    generator = _load_generator()
+    pumps = generator.WIDEBAND_CONFIGS["cl152"]["bwd_sixpumps"]
+    signal = _signal(n_samples=512, sample_rate_hz=100e9, center_freq_hz=190.15e12)
+    common = {"nonlinear": True, "pump_model": "depleted", "coarse_step_m": 100.0}
+    reference = generator.make_wideband_fiber(pumps, **common)
+    enabled = generator.make_wideband_fiber(pumps, pump_pump_raman=True, **common)
+    for fiber in (reference, enabled):
+        fiber.depleted_step_m = 100.0
+    reference_out = reference.forward(signal)
+    enabled_out = enabled.forward(signal)
+
+    balance = enabled_out.ctx.meta["dra_pump_energy_balance"]
+    assert balance["converged"] is True
+    assert balance["pump_pump_raman"] is True
+    assert 1 < balance["iterations"] <= enabled.depleted_max_iterations
+    assert balance["pump_pump_net_total_w"] < 0.0
+
+    # 后向泵在 z=L 发射，残余取 z=0。
+    launch_w = np.array([pump.power_w for pump in pumps])
+    reference_residual = reference._depleted_pump_power[:, 0]
+    enabled_residual = enabled._depleted_pump_power[:, 0]
+    pumps_diag = balance["pumps"]
+    # 1340/1360 nm 把功率交出去（几乎被抽空），1427/1445/1476/1505 nm 收下。
+    for index in (0, 1):
+        assert enabled_residual[index] < reference_residual[index] * 1e-2
+        assert pumps_diag[index]["pump_pump_sent_w"] > 0.5
+        assert pumps_diag[index]["pump_pump_received_w"] < 1e-4
+    assert pumps_diag[2]["pump_pump_received_w"] > 0.5  # 1427 nm 接 1340/1360
+    for index in (3, 4, 5):  # 1445 / 1476 / 1505 nm
+        assert pumps_diag[index]["pump_pump_received_w"] > 0.01
+    # 1427 nm 既是接收端也是 1505 nm 的供给端，净收益仍为正。
+    assert pumps_diag[2]["pump_pump_net_w"] > 0.0
+    # 发射端的标称功率不因泵浦-泵浦项改变。
+    assert np.allclose(enabled._depleted_pump_power[:, -1], launch_w, rtol=1e-12)
+
+
 def test_depleted_reference_dataset_schema() -> None:
     """耗尽参考数据集应可读，并体现泵浦耗尽导致的增益退化。"""
     json_path = REFERENCE_DIR / "dra_reference_depleted.json"
