@@ -1892,6 +1892,17 @@ spectral+pp 比旧 scalar+pp 恢复 **+22.301 dB**，不再出现 5.9 dB 的崩�
    JSON；`examples/dra_reference_wide/*.npz` 未改。若要把 spectral 设为
    默认或启用 pp，需要同时重跑参考数据集并复核对解析模型的 NLI 口径。
 
+> **后续复核（2026-11-07，network `docs/dra-open-issues.md` §9）**：对
+> spectral+pp 逐信道复核后，上述 3.2–3.8 dB 中约 **1–2 dB 来自 0.488 m
+> SSFM 步长未收敛**（96-symbol 中心残差 0.488→0.244 m 为 +2.967→+1.873 dB；
+> 48-symbol pp 为 +6.689→+5.458 dB，no-pp 仅 +1.746→+1.011 dB）。低端
+> ch0 的 +10.55 dB 残差是 97.5 GHz 保护带下的记录边缘伪影（需 2× 采样率
+> 确认）；解析侧模型排序为 numerical < H3 < hybrid（中心残差
+> +2.06/+2.92/+3.26 dB），强倾斜下 hybrid 的 5 参数剖面拟合最弱。因此
+> **当前 pp 波形不能作为 NLI 校准参考**；启用前需步长 ≤0.122 m（并在
+> 0.061 m 确认）、≥2× 采样/≥500 GHz 保护带、≥4 seeds。若业务先用 pp，
+> 解析侧优先 H3 或 numerical，并标注 +1~+3 dB 不确定度。
+
 ### 13.9.8 复现
 
 ```bash
