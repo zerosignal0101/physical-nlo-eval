@@ -20,6 +20,9 @@
         examples/diagnose_dra_profile.py \
         --cases cl152:bwd_sixpumps cl152:fwd_0p20w c57:bwd_0p20w c57:fwd_0p20w \
         --output examples/dra_reference_wide/diagnostics/profile_diagnosis.json
+
+``--pump-pump`` 打开物理侧的泵浦-泵浦拉曼转移（默认关闭，输出与已提交
+JSON 数值一致，只多 ``pump_pump_raman`` 与三项能量账字段）。
 """
 
 from __future__ import annotations
@@ -129,6 +132,7 @@ def _physics_profiles(metadata: dict, config: str, waveform: np.ndarray, couplin
         pump_model="depleted",
         depleted_max_iterations=int(extra.get("iterations", 8)),
         depletion_coupling=coupling,
+        pump_pump_raman=bool(extra.get("pump_pump", False)),
     )
     input_power_w = float(np.sum(np.mean(np.abs(waveform) ** 2, axis=1)))
     band_freqs_hz = None
@@ -526,6 +530,7 @@ def _case(plan: str, config: str, data_dir: Path, coupling: str, extra: dict, ne
         "input_power_w": input_power_w,
         "center_frequency_hz": float(metadata["plan"]["center_frequency_hz"]),
         "depleted_max_iterations": int(extra.get("iterations", 8)),
+        "pump_pump_raman": bool(extra.get("pump_pump", False)),
         "coarse_step_m": float(extra.get("step_m") or metadata["coarse_step_m"]),
         "coupling": coupling_section,
         "physics": {
@@ -539,6 +544,16 @@ def _case(plan: str, config: str, data_dir: Path, coupling: str, extra: dict, ne
             "pump_passive_loss_w": [
                 float(p["passive_loss_w"]) for p in physics["diagnostics"]["pumps"]
             ],
+            "pump_pump_sent_w": [
+                float(p["pump_pump_sent_w"]) for p in physics["diagnostics"]["pumps"]
+            ],
+            "pump_pump_received_w": [
+                float(p["pump_pump_received_w"]) for p in physics["diagnostics"]["pumps"]
+            ],
+            "pump_pump_net_w": [
+                float(p["pump_pump_net_w"]) for p in physics["diagnostics"]["pumps"]
+            ],
+            "pump_pump_net_total_w": float(physics["diagnostics"]["pump_pump_net_total_w"]),
             "signal_out_w": float(physics["signal_w"][-1]),
             "on_off_gain_db": {
                 "center": float(physics_on_off_db[0]),
@@ -658,6 +673,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--iterations", type=int, default=8, help="物理耗尽模型不动点迭代上限")
     parser.add_argument("--step-m", type=float, default=None, help="覆盖物理侧 SSFM 步长 (m)")
     parser.add_argument("--snr", action="store_true", help="额外跑一次 SSFM，给出中心信道 SNR")
+    parser.add_argument(
+        "--pump-pump",
+        action="store_true",
+        help="物理侧打开 pump_pump_raman（默认关闭，保持与参考数据逐位一致）",
+    )
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args(argv)
 
@@ -670,14 +690,20 @@ def main(argv: list[str] | None = None) -> int:
             config,
             args.data_dir,
             args.coupling,
-            {"iterations": args.iterations, "snr": args.snr, "step_m": args.step_m},
+            {
+                "iterations": args.iterations,
+                "snr": args.snr,
+                "step_m": args.step_m,
+                "pump_pump": args.pump_pump,
+            },
             network,
         )
         cases.append(row)
         physics = row["physics"]
         print(
             f"{tag:22s} phys pump residual {np.sum(physics['pump_residual_w']):.6g} W "
-            f"signal_out {physics['signal_out_w']:.6g} W conv={physics['depletion_converged']}"
+            f"signal_out {physics['signal_out_w']:.6g} W conv={physics['depletion_converged']} "
+            f"pp_net {physics['pump_pump_net_total_w']:.6g} W"
         )
         for factor in ("1", "2"):
             ana = row["analytic"][factor]

@@ -513,6 +513,7 @@ def make_fiber(
     nonlinear: bool,
     pump_model: str = "undepleted",
     coarse_step_m: float = COARSE_STEP_M,
+    pump_pump_raman: bool = False,
 ) -> DistributedRamanFiber:
     """构造 DRA 光纤；``nonlinear=False`` 时关闭 Kerr 作为线性参考。"""
     return DistributedRamanFiber(
@@ -525,6 +526,7 @@ def make_fiber(
         n2_si=N2_SI if nonlinear else 0.0,
         a_eff_um2=A_EFF_UM2,
         pump_model=pump_model,
+        pump_pump_raman=pump_pump_raman,
         add_ase=False,
     )
 
@@ -669,6 +671,7 @@ def make_wideband_fiber(
     nonlinear: bool,
     pump_model: str = "depleted",
     coarse_step_m: float,
+    pump_pump_raman: bool = False,
 ) -> DistributedRamanFiber:
     """构造全 WDM 参考用的 DRA 光纤（平坦 alpha，1550 nm beta2）。"""
     return DistributedRamanFiber(
@@ -681,6 +684,7 @@ def make_wideband_fiber(
         n2_si=WIDEBAND_N2_SI if nonlinear else 0.0,
         a_eff_um2=WIDEBAND_A_EFF_UM2,
         pump_model=pump_model,
+        pump_pump_raman=pump_pump_raman,
         add_ase=False,
     )
 
