@@ -912,12 +912,12 @@ class DistributedRamanFiber(FiberChannel):
                 updated[:, -1] = y
                 for k in range(n_steps, 0, -1):
                     z0 = z[k]
-                    h = -dz
+                    step = -dz
                     k1 = backward_rhs(z0, y)
-                    k2 = backward_rhs(z0 + h / 2, y + 0.5 * h * k1)
-                    k3 = backward_rhs(z0 + h / 2, y + 0.5 * h * k2)
-                    k4 = backward_rhs(z0 + h, y + h * k3)
-                    y = y + h * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
+                    k2 = backward_rhs(z0 + step / 2, y + 0.5 * step * k1)
+                    k3 = backward_rhs(z0 + step / 2, y + 0.5 * step * k2)
+                    k4 = backward_rhs(z0 + step, y + step * k3)
+                    y = y + step * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
                     updated[:, k - 1] = y
                 if backward_relaxation >= 1.0:
                     profile[bwd_idx] = updated
@@ -955,9 +955,9 @@ class DistributedRamanFiber(FiberChannel):
         gain_per_bin = gamma.T @ profile  # (n_bins, n_steps+1)
         signal_gain = float(_trapezoid(np.sum(gain_per_bin * ps, axis=0), z))
         signal_photon_gain = float(
-            _trapezoid(np.sum(gain_per_bin * ps / bin_freqs[:, None], axis=0), z)
+            _trapezoid(np.sum(gain_per_bin * ps / (h * bin_freqs[:, None]), axis=0), z)
         )
-        pump_photon_transfer = float(np.sum(transfer / pump_freqs))
+        pump_photon_transfer = float(np.sum(transfer / (h * pump_freqs)))
         if pp_coupling is None:
             pp_sent = np.zeros(self.n_pumps)
             pp_received = np.zeros(self.n_pumps)

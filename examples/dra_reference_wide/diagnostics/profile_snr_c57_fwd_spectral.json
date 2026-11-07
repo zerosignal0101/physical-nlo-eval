@@ -12,7 +12,7 @@
       "n_channels": 57,
       "input_power_w": 0.11410523860360233,
       "center_frequency_hz": 193750000000000.0,
-      "depleted_max_iterations": 32,
+      "depleted_max_iterations": 8,
       "pump_pump_raman": false,
       "coarse_step_m": 0.48828125,
       "coupling": {
@@ -58,8 +58,8 @@
         "signal_out_w": 0.006401518685233588,
         "signal_center_out_w": 0.00012843991603966236,
         "spectral_bins": 256,
-        "signal_photon_gain_per_s": 6.00034647000878e-16,
-        "pump_photon_transfer_per_s": 6.000346470008779e-16,
+        "signal_photon_gain_per_s": 9.055663966987702e+17,
+        "pump_photon_transfer_per_s": 9.0556639669877e+17,
         "on_off_gain_db": {
           "center": 4.2780091448188,
           "low": 2.871197443832558,

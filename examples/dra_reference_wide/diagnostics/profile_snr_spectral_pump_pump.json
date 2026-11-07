@@ -133,8 +133,8 @@
         "signal_out_w": 0.4458724429446332,
         "signal_center_out_w": 0.0005546317225945372,
         "spectral_bins": 256,
-        "signal_photon_gain_per_s": 2.8371358972340207e-15,
-        "pump_photon_transfer_per_s": 2.8371358972340203e-15,
+        "signal_photon_gain_per_s": 4.2817776344158085e+18,
+        "pump_photon_transfer_per_s": 4.2817776344158085e+18,
         "on_off_gain_db": {
           "center": 9.826611327283638,
           "low": 9.70097995189667,

@@ -1765,8 +1765,8 @@ cl152 六泵 + pp 在 25 m RK4、阈值 1e-8 下 **26 次迭代收敛**。注意
 诊断字典新增 `signal_out_w`、`spectral_bins`、`depletion_model`，以及
 两个光子账标量：
 
-* `signal_photon_gain_per_s = ∫ Σ_b (Σ_p γ_{p,b} P_p) P_{s,b} / f_b dz`
-* `pump_photon_transfer_per_s = Σ_p transfer_p / f_p`
+* `signal_photon_gain_per_s = ∫ Σ_b (Σ_p γ_{p,b} P_p) P_{s,b} / (h f_b) dz`
+* `pump_photon_transfer_per_s = Σ_p transfer_p / (h f_p)`
 
 其中 `transfer_p = ∫ P_p Σ_b (f_p/f_b) γ_{p,b} P_{s,b} dz`。逐泵能量账仍是
 
@@ -1787,7 +1787,7 @@ cl152 `bwd_sixpumps`、0.304 W 输入、25 m RK4、32 次上限（26 次收敛�
 
 单位 W；账余最大 5.4e-7 W。**Σ net = −0.07217 W < 0**，差额以声子能量
 离开光场。光子账：
-`signal_photon_gain_per_s = pump_photon_transfer_per_s = 2.837135897e-15 s⁻¹`
+`signal_photon_gain_per_s = pump_photon_transfer_per_s = 4.281777634e18 s⁻¹`
 （相对差 1.4e-16），逐箱光子数严格守恒。
 
 同一次求解的总信号功率：
