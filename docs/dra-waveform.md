@@ -81,6 +81,11 @@ dP_p/dz = −s_p · [ α_p P_p + (f_p/f_s) γ_p P_p P_s ]
 - 信号的实际增益仍按频率逐点施加：`γ_R(f, z) = Σ_p g_peak g̃(f_p−f) P_p(z)/A_eff`，
   其中 `P_p(z)` 来自上面的数值剖面。
 
+> 上面的 `P_s(z)` 是默认 `depletion_model="scalar"` 的口径。可选
+> `depletion_model="spectral"` 把 `P_s` 换成逐频箱功率向量，使泵浦 ODE
+> 与 SSFM 的逐频率增益同口径；方程、谱箱和能量账见 §13.9。默认仍是
+> `"scalar"`，参考数据逐位不变。
+
 求解方式：先用未耗尽剖面估一个初始 `P_s(z)`；后向泵从 z=L 反向积分、
 前向泵与信号从 z=0 正向积分，两者交替做不动点迭代直到相对变化小于
 `depleted_tolerance`（默认 `1e-8`）。纯前向泵时第一次迭代即收敛；
@@ -197,6 +202,8 @@ fiber = DistributedRamanFiber(
     ],
     coarse_step_size_m=500.0,
     pump_model="depleted",     # 默认 "undepleted"
+    depletion_model="scalar",  # 可选 "spectral"，见 §13.9
+    spectral_bins=256,
     add_ase=False,
 )
 output = fiber.forward(wdm_signal)
@@ -217,6 +224,8 @@ print(output.ctx.meta["dra_pump_energy_balance"])
 | `dra_ase_model` | `"none"` 或 `"undepleted-raman-ase"` |
 | `dra_ase_power_per_pol_w` | 可选 ASE 功率 |
 | `dra_pump_model_detail` | 仅耗尽模型：耦合方程与迭代方式说明 |
+| `dra_depletion_model` | 仅耗尽模型：`"scalar"` 或 `"spectral"`（§13.9） |
+| `dra_spectral_bins` | 仅谱域耗尽：有效频箱数；scalar 为 `null` |
 | `dra_pump_energy_balance` | 仅耗尽模型：逐泵初值/残余/损耗/转移功率与信号增益 |
 | `dra_depletion_iterations` / `dra_depletion_converged` | 仅耗尽模型：不动点迭代诊断 |
 
@@ -1410,7 +1419,8 @@ f_s/f_p）。两者都"自洽"，但相对彼此差 `(f_s/f_p)² ≈ 0.878`：�
    能直接改善该配置剖面差的项。代价是物理 ODE 从"每泵独立"变成
    泵浦-泵浦耦合矩阵，后向泵不动点迭代的收敛性要重新验证。
    **已实现并实测，见 §13.8**：剖面差确实按预期下降，但增益形状与
-   SNR 明显恶化，因此保持默认关闭。
+   SNR 明显恶化，因此保持默认关闭。谱域耗尽驱动补上后再测，见 §13.9：
+   SNR 崩坏已修复，但 pp 仍有约 3.2–3.8 dB 的代价，默认仍关闭。
 2. **解析侧光子因子已修正**：network `a0982cd` 把 `−(f_s/f_p)` 改成
    光子数守恒的 `−(f_p/f_s)`，并加了守恒回归测试。物理侧不需要迁就；
    全 WDM 残差的最新值见 network `docs/dra-open-issues.md` §8。
@@ -1421,6 +1431,8 @@ f_s/f_p）。两者都"自洽"，但相对彼此差 `(f_s/f_p)² ≈ 0.878`：�
 4. 分离解析侧 5 参数拟合对 NLI 的贡献（本节未量化）。
 5. **把泵浦耗尽的信号驱动从单标量改成逐信道/逐频率功率**，这是启用
    泵浦-泵浦项的前提；否则 §13.8 的 SNR 崩坏会一直存在。
+   **已实现，见 §13.9**：`depletion_model="spectral"` 修复了非物理放大，
+   但 pp 仍使 SNR 比 no-pp 低 3.2–3.8 dB，因此不作为默认。
 
 ### 13.7 复现
 
@@ -1630,6 +1642,14 @@ PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
     --output examples/dra_reference_wide/diagnostics/profile_snr_pump_pump.json
 ```
 
+> **注意（2026-11-07）**：上面的命令是在 §13.9 之前记录的。现在
+> `pump_pump_raman=True` 与 `depletion_model="scalar"` 已显式禁止，
+> `--pump-pump` 未指定 `--depletion-model` 时会默认 `spectral`；直接重跑
+> 会得到 §13.9 的新结果，而不是本节的历史 scalar+pp 数字。历史 JSON
+> （`profile_diagnosis_pump_pump.json`、`profile_snr_pump_pump.json`）保留
+> 作对照，不要用当前 CLI 覆盖。复现历史 scalar+pp 需要 §13.9 之前的
+> 代码版本。
+
 不动点收敛（cl152 全波形、25 m RK4、阈值 1e-8）：打开 pp 后 8 次不收敛，
 16 次仍不收敛，31 次收敛。8→16 次中心 on-off 只变 0.024 dB（12.030→12.054），
 16→32 次只变 0.0002 dB，剖面差与能量账在 4 位有效数字内不变；因此 §13.8 的
@@ -1641,3 +1661,269 @@ PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
 > 生成的 `profile_diagnosis*.json` 与 `profile_snr_pump_pump.json` 已用
 > 修正后的解析侧。
 
+> **后续（2026-11-07）**：§13.8 的负结果保留作历史对照。它的直接原因
+> （"单标量信号功率 + 逐频率增益"口径失配）已在 §13.9 用逐频箱泵浦耗尽
+> 驱动修复：cl152 六泵 + pp 的总输出从 5.88 W 回到 0.446 W，SNR 从
+> 5.889 dB 回到 28.190 dB。但 pp 仍带来约 3.2–3.8 dB 的 SNR 代价，因此
+> **默认仍然关闭**；结论见 §13.9.7。
+
+## 13.9 逐信道/逐频率的泵浦耗尽驱动
+
+§13.8 证明：打开 `pump_pump_raman` 后，物理侧的"单标量带内总功率 + 逐频率
+增益"近似与 SSFM 不再同口径，导致 0.304 W 输入出现 5.88 W 的非物理线性
+输出和 5.9 dB 的 SNR 崩坏。本节把泵浦 ODE 的信号驱动改成**逐频箱功率**，
+让泵浦耗尽量与 SSFM 在每一频点施加的增益使用同一个 γ，再重跑 §13.8 的
+A/B。默认仍是 `"scalar"`，本节的谱域口径是**可选实验路径**；重新生成
+`examples/dra_reference_wide/*.npz` 是另一步，本次没有做。
+
+### 13.9.1 API 与约束
+
+`DistributedRamanFiber.__init__` 新增：
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `depletion_model` | `"scalar"` | `"scalar"`（历史口径）或 `"spectral"`（逐频箱） |
+| `spectral_bins` | `256` | 谱域模型的频箱数，必须 >0 |
+
+导出常量 `DEPLETION_MODELS = ("scalar", "spectral")`。
+
+* 默认 `"scalar"` 的数值路径**未改动**：3ch 耗尽参考 `np.array_equal`、
+  六泵后向配置与 `dra-dev` 逐位一致（全量测试通过）。
+* `pump_pump_raman=True` 只允许 `depletion_model="spectral"`；与
+  `"scalar"` 同时使用显式抛 `ValueError`（提示先启用谱域驱动）。
+  与 `pump_model="undepleted"` 的旧报错保持不变。
+* `depletion_coupling` 只对 `"scalar"` 有意义。`"spectral"` 时忽略它，
+  元数据 `dra_depletion_coupling` 记为 `null`，`dra_pump_model_detail`
+  明确写 "depletion_coupling is not used"；显式给非默认值会发
+  `RuntimeWarning`，不静默混用。
+
+### 13.9.2 频箱与耦合系数
+
+`forward()` 从输入 `opt_signal` 构造频域功率分布，频率轴与 SSFM 完全一致：
+
+```
+freqs    = center_freq + fftfreq(n, 1/fs) · n/(n−1)
+spectrum = mean(|FFT(data)|², axis=polarization)
+```
+
+把频率轴等宽划分为 `spectral_bins` 个箱，只保留有功率的箱（空箱权重 0）。
+每箱用**功率加权平均频率**作为代表：
+
+```
+f_b = Σ_{k∈b} S_k f_k / Σ_{k∈b} S_k
+w_b = Σ_{k∈b} S_k / Σ_all S_k          # Σ_b w_b = 1
+```
+
+信号总功率仍取 `input_power_w = Σ_pol mean_t |A|²`，
+`P_{s,b}(0) = input_power_w · w_b`，因此 `Σ_b P_{s,b}(0) = input_power_w`。
+输入波形本身不被修改；这些频箱只驱动泵浦 ODE。
+
+逐箱耦合系数：
+
+```
+γ_{p,b} = g_peak · g̃_R(f_p − f_b) / A_eff
+```
+
+复用 `raman_gain_spectrum`、`raman_peak_gain_m_per_w`、`raman_fwhm_hz`、
+`raman_peak_shift_hz` 与 `a_eff_si`，与 `_make_step_gain` 的 SSFM 逐频率
+增益同源。信号损耗沿用 `alpha_np_inv_m` 的均值（参考数据只有平坦损耗），
+光子因子 `f_p/f_b` **逐箱**计算。
+
+### 13.9.3 耦合 ODE 与数值实现
+
+状态量 `P_{s,b}`（形状 `(n_bins,)`）与 `P_p`（形状 `(n_pumps,)`）：
+
+```
+dP_{s,b}/dz = (Σ_p γ_{p,b} P_p − α_s) P_{s,b}
+dP_p/dz     = −s_p [ α_p P_p
+                     + P_p Σ_b (f_p/f_b) γ_{p,b} P_{s,b}
+                     + P_p Σ_j C_{pj} P_j ]
+```
+
+`C` 与 §13.8 的 `_pump_pump_coupling()` 完全相同（成对光子数守恒，符号和
+频率因子未改）。前向/后向 RK4 结构沿用标量实现：前向把 `P_{s,b}` 和前向泵
+一起作为状态积分；后向 RHS 用 `ps(:, z)` 的逐箱线性插值。
+
+初值用未耗尽泵浦剖面和逐箱速率积分出完整的 `P_{s,b}(z)`，供后向泵第一次
+迭代使用，不退回标量初值。
+
+**后向泵的欠松弛。** cl152 六泵全为后向泵。谱域 + pp 打开后，从 z=L 反向
+积分 `dP/dz = +λP` 的条件数很大；直接把 RK4 结果整条替换会让不动点出现
+周期 2 振荡（实测 `pump_err` 在 2.2–3.2 之间来回跳，`signal_out` 在
+0.13–3.4 W 之间振荡，256 次仍不满足 1e-8）。因此对**后向泵剖面**做
+`profile ← (1−θ)·previous + θ·updated`，取 θ=0.5；θ=0.25 收敛到同一
+不动点（on-off 与 `signal_out` 在 8 位有效数字内相同）。没有 pp 项时
+θ=1（保持原样，13 次收敛）。θ 只影响不动点迭代的收敛速度，不改变方程。
+
+cl152 六泵 + pp 在 25 m RK4、阈值 1e-8 下 **26 次迭代收敛**。注意
+`depleted_max_iterations` 的类默认值仍是 8；谱域 + pp 需要调用方显式提高
+上限（本节的诊断统一用 `--iterations 32`），并检查
+`dra_depletion_converged`。
+
+### 13.9.4 能量账
+
+诊断字典新增 `signal_out_w`、`spectral_bins`、`depletion_model`，以及
+两个光子账标量：
+
+* `signal_photon_gain_per_s = ∫ Σ_b (Σ_p γ_{p,b} P_p) P_{s,b} / (h f_b) dz`
+* `pump_photon_transfer_per_s = Σ_p transfer_p / (h f_p)`
+
+其中 `transfer_p = ∫ P_p Σ_b (f_p/f_b) γ_{p,b} P_{s,b} dz`。逐泵能量账仍是
+
+```
+launch − residual − passive − transferred + pump_pump_net ≈ 0
+```
+
+cl152 `bwd_sixpumps`、0.304 W 输入、25 m RK4、32 次上限（26 次收敛）实测：
+
+| 泵 (nm) | launch | residual | passive | →信号 | sent | recv | net | 账余 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1340 | 0.630 | 1.12e-5 | 0.11753 | 2.5e-12 | 0.51245 | 0 | −0.51245 | +3.0e-7 |
+| 1360 | 0.630 | 1.11e-5 | 0.12313 | 4.4e-8 | 0.50687 | 9.2e-6 | −0.50686 | −9.7e-8 |
+| 1427 | 0.165 | 1.42e-4 | 0.29228 | 0.21401 | 0.20614 | 0.54757 | +0.34143 | +2.4e-7 |
+| 1445 | 0.131 | 7.07e-5 | 0.24345 | 0.25352 | 0.01952 | 0.38556 | +0.36604 | +5.4e-7 |
+| 1476 | 0.125 | 1.52e-5 | 0.10386 | 0.04987 | 8.2e-6 | 0.02875 | +0.02875 | +7.8e-8 |
+| 1505 | 0.075 | 1.38e-4 | 0.21588 | 0.06991 | 0 | 0.21092 | +0.21092 | −1.1e-7 |
+
+单位 W；账余最大 5.4e-7 W。**Σ net = −0.07217 W < 0**，差额以声子能量
+离开光场。光子账：
+`signal_photon_gain_per_s = pump_photon_transfer_per_s = 4.281777634e18 s⁻¹`
+（相对差 1.4e-16），逐箱光子数严格守恒。
+
+同一次求解的总信号功率：
+
+| 量 | 值 (W) |
+| --- | ---: |
+| ODE `signal_out_w` | 0.445872 |
+| 非线性 SSFM 总输出（n2=2.6e-20） | 0.445825 |
+| 频域线性参考总输出（n2=0） | 0.445871 |
+
+ODE 与 SSFM 相对差 **1.1e-4**，与线性参考 **3.8e-6**；三者都在
+"输入 0.304 W + 泵浦总注入 1.756 W = 2.060 W" 以下，§13.8 的 5.88 W
+非物理放大已经消失。
+
+### 13.9.5 scalar vs spectral
+
+**窄带/CW 一致性**：100 GHz 采样、单 1450 nm 前向泵、每偏振 1 mW，
+scalar 与 spectral 的末泵浦残余相对差 **2.5e-5**、输出功率相对差
+**1.8e-5**，均远小于 0.1%。
+
+**c57 `fwd_0p20w`（单泵，pp 不参与）**，step 0.48828125：
+
+| 物理侧 | 波形 `snr_nli_db` | 解析残差 f=1 / f=2 | ODE 总输出 / SSFM 总输出 |
+| --- | ---: | ---: | ---: |
+| scalar | 28.732 | −3.701 / −1.721 | 0.006539 / 0.005797（差 12.8%） |
+| spectral | 28.072 | −3.040 / −1.060 | 0.006402 / 0.006402（差 6e-7） |
+
+spectral 让波形 SNR 下移 0.660 dB，与 §13.5 的 `band_average` 结果
+（−0.698 dB）同向同量级；解析残差同时改善约 0.66 dB，因此这不是谱域
+引入的独立退化，而是"用真实信号谱驱动泵浦"后的预期变化。更重要的是，
+**scalar 的 ODE 总输出与 SSFM 相差 12.8%，spectral 只有 6e-7**，说明
+谱域驱动才与 SSFM 同口径。
+
+**cl152 `bwd_sixpumps` 不带 pp**（0.48828125 m）：scalar 列取
+`profile_diagnosis_scalar_32iter.json`（32 次迭代，`converged=True`），
+与 spectral 使用同一迭代上限；它与 §13.5 的 8 次版本在 on-off 上只差
+5e-5 dB 量级。
+
+| 物理侧 | 波形 `snr_nli_db` | 解析残差 f=1 / f=2 | 泵浦剖面差 f=1 / f=2 | 中心信号剖面差 f=1 / f=2 |
+| --- | ---: | ---: | ---: | ---: |
+| scalar | 31.354 | +0.100 / +0.850 | 18.5 / 7.8%, 20.6 / 8.8% | 19.5 / 5.7%, 11.5 / 3.3% |
+| spectral | 31.453 | +0.001 / +0.751 | 18.0 / 7.5%, 20.2 / 8.5% | 17.8 / 5.1%, 9.7 / 2.7% |
+
+不带 pp 时 spectral 基本中性（+0.099 dB），剖面差略降；ODE 总输出与 SSFM
+相对差 5.2e-5（0.048131 / 0.048128 W）。
+
+### 13.9.6 cl152 六泵 spectral + pp 的 A/B
+
+step 0.48828125 m、25 m RK4、32 次上限。旧 scalar+pp 负结果取自已提交的
+`profile_diagnosis_pump_pump.json` / `profile_snr_pump_pump.json`（该组合
+现在被 API 禁止，不再重跑）；新结果在
+`profile_diagnosis_spectral_pump_pump.json` /
+`profile_snr_spectral_pump_pump.json`。
+
+**剖面与开关增益：**
+
+| 物理侧 | 中心/低/高 on-off (dB) | 泵浦剖面差 f=1 / f=2 | 中心信号剖面差 f=1 / f=2 | ODE `signal_out_w` |
+| --- | ---: | ---: | ---: | ---: |
+| scalar + pp（旧） | 12.05 / 20.36 / 35.43 | 12.5 / 5.0%, 14.6 / 6.0% | 9.0 / 2.5%, 17.0 / 4.8%* | 0.1171 W |
+| spectral + pp（新） | **9.83 / 9.70 / 25.24** | **2.2 / 0.9%, 0.6 / 0.2%** | **7.4 / 2.2%, 0.7 / 0.2%** | **0.4459 W** |
+| 解析 f=1 | 10.97 / 13.58 / 24.95 | — | — | — |
+| 解析 f=2 | 9.71 / 12.86 / 22.02 | — | — | — |
+
+\* 旧 scalar 路径没有频谱信息，它的"中心信号剖面"实际是带内总功率，与
+spectral 的中心信道提取不是同一观测量；旧值只作历史对照。
+
+spectral+pp 的中心 on-off（9.83 dB）与解析 f=2（9.71 dB）相差 0.12 dB，
+高带边（25.24 dB）与解析 f=1（24.95 dB）相差 0.29 dB，低带边（9.70 dB）
+仍比解析 f=1/f=2 低 3.2–3.9 dB。相对于旧 scalar+pp 的 35.43 dB 高带边，
+增益形状已经回到解析量级。泵浦与中心信号剖面差也从 12–17% 降到 0.2–7.4%。
+
+**中心信道 SNR：**
+
+| 物理侧 | 波形 `snr_nli_db` | 解析残差 f=1 / f=2 |
+| --- | ---: | ---: |
+| scalar 无 pp（§13.5 同 step） | 31.354 | +0.100 / +0.850 |
+| spectral 无 pp（本次） | 31.453 | +0.001 / +0.751 |
+| scalar + pp（旧负结果） | **5.889** | +25.564 / +26.314 |
+| spectral + pp（新） | **28.190** | +3.263 / +4.013 |
+
+spectral+pp 比旧 scalar+pp 恢复 **+22.301 dB**，不再出现 5.9 dB 的崩坏；
+总输出也从 5.88 W 回到 0.446 W。但相对同 step 的 no-pp 波形
+（31.354/31.453 dB），spectral+pp 仍低 **3.16–3.82 dB**，解析残差
++3.26/+4.01 dB，超过任务设定的 2 dB 门槛。
+
+### 13.9.7 结论与建议
+
+1. **默认仍是 `depletion_model="scalar"` + `pump_pump_raman=False`。**
+   scalar 路径逐位不变；谱域口径是可选的实验路径。
+2. **谱域耗尽本身是成功的**：窄带与标量一致到 2.5e-5；单泵 c57 与六泵
+   cl152 的 ODE 总输出都与 SSFM 对齐到 1e-4 量级（标量路径差 12.8%）；
+   逐泵能量账闭合到 1e-6 W，逐箱光子数守恒到 1e-16。它解决了 §13.8 的
+   "单标量 + 逐频率增益"口径失配。
+3. **仍不建议启用 `pump_pump_raman=True`。** 虽然非物理放大和 SNR 崩坏
+   已经修复，但 pp 把 1340/1360 nm 的约 0.47 W 转给 1427/1445/1505 nm 后，
+   带边信道开关增益仍达 25.2 dB（中心 9.83 dB），中心信道承受来自被放大
+   带边信道的 XPM/FWM，波形 SNR 比 no-pp 低 3.16–3.82 dB。解析侧
+   `hybrid_raman_paper` 的 GN 口径给出 31.45/32.20 dB，残差 +3.3/+4.0 dB，
+   说明剩余差不是 ODE/SSFM 口径错配（两者总输出已对齐到 1e-4），而是
+   pp 造成的强增益倾斜下 NLI 口径的系统差。
+4. **重生成参考数据是另一步。** 本次只提交代码、测试、诊断脚本和诊断
+   JSON；`examples/dra_reference_wide/*.npz` 未改。若要把 spectral 设为
+   默认或启用 pp，需要同时重跑参考数据集并复核对解析模型的 NLI 口径。
+
+### 13.9.8 复现
+
+```bash
+# 谱域剖面诊断（秒级）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/diagnose_dra_profile.py --cases cl152:bwd_sixpumps \
+    --depletion-model spectral --step-m 0.48828125 --iterations 32 \
+    --output examples/dra_reference_wide/diagnostics/profile_diagnosis_spectral.json
+
+# 谱域 + pp 剖面诊断（约 15 s）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/diagnose_dra_profile.py --cases cl152:bwd_sixpumps --pump-pump \
+    --step-m 0.48828125 --iterations 32 \
+    --output examples/dra_reference_wide/diagnostics/profile_diagnosis_spectral_pump_pump.json
+
+# 谱域 / 谱域+pp 的中心信道 SNR（各约 6 min）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/diagnose_dra_profile.py --cases cl152:bwd_sixpumps --snr \
+    --depletion-model spectral --step-m 0.48828125 --iterations 32 \
+    --output examples/dra_reference_wide/diagnostics/profile_snr_spectral.json
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/diagnose_dra_profile.py --cases cl152:bwd_sixpumps --snr --pump-pump \
+    --step-m 0.48828125 --iterations 32 \
+    --output examples/dra_reference_wide/diagnostics/profile_snr_spectral_pump_pump.json
+
+# c57 fwd 单泵对照（各约 5 min）
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/diagnose_dra_profile.py --cases c57:fwd_0p20w --snr \
+    --depletion-model scalar --step-m 0.48828125 --iterations 32 \
+    --output examples/dra_reference_wide/diagnostics/profile_snr_c57_fwd_scalar.json
+PYTHONPATH=src /home/zsig/miniconda3/envs/nlo/bin/python \
+    examples/diagnose_dra_profile.py --cases c57:fwd_0p20w --snr \
+    --depletion-model spectral --step-m 0.48828125 --iterations 32 \
+    --output examples/dra_reference_wide/diagnostics/profile_snr_c57_fwd_spectral.json
+```

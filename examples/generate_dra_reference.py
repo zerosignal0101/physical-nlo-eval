@@ -514,6 +514,8 @@ def make_fiber(
     pump_model: str = "undepleted",
     coarse_step_m: float = COARSE_STEP_M,
     pump_pump_raman: bool = False,
+    depletion_model: str = "scalar",
+    spectral_bins: int = 256,
 ) -> DistributedRamanFiber:
     """构造 DRA 光纤；``nonlinear=False`` 时关闭 Kerr 作为线性参考。"""
     return DistributedRamanFiber(
@@ -527,6 +529,8 @@ def make_fiber(
         a_eff_um2=A_EFF_UM2,
         pump_model=pump_model,
         pump_pump_raman=pump_pump_raman,
+        depletion_model=depletion_model,
+        spectral_bins=spectral_bins,
         add_ase=False,
     )
 
@@ -672,6 +676,8 @@ def make_wideband_fiber(
     pump_model: str = "depleted",
     coarse_step_m: float,
     pump_pump_raman: bool = False,
+    depletion_model: str = "scalar",
+    spectral_bins: int = 256,
 ) -> DistributedRamanFiber:
     """构造全 WDM 参考用的 DRA 光纤（平坦 alpha，1550 nm beta2）。"""
     return DistributedRamanFiber(
@@ -685,6 +691,8 @@ def make_wideband_fiber(
         a_eff_um2=WIDEBAND_A_EFF_UM2,
         pump_model=pump_model,
         pump_pump_raman=pump_pump_raman,
+        depletion_model=depletion_model,
+        spectral_bins=spectral_bins,
         add_ase=False,
     )
 

@@ -22,11 +22,13 @@ import pytest
 from scipy.constants import c
 
 from physics_nlo_eval.channel import (
+    DEPLETION_MODELS,
     DistributedRamanFiber,
     FiberChannel,
     PumpSpec,
     RamanPump,
     raman_gain_spectrum,
+    signal_spectrum_bins,
 )
 from physics_nlo_eval.core.signal import Signal, SignalContext
 
@@ -536,6 +538,255 @@ def test_band_average_changes_wideband_pump_residual_for_both_directions() -> No
         assert residuals["band_average"] / residuals["center"] > 1.05
 
 
+def test_depletion_model_defaults_to_scalar_and_is_bit_exact() -> None:
+    """缺省 ``depletion_model="scalar"`` 必须与显式 scalar 逐位一致。"""
+    signal = _signal(n_samples=1024, power_w=5e-3, seed=11)
+    common = _fiber_kwargs(
+        pumps=PumpSpec(1450.0, 0.2, "backward"), pump_model="depleted"
+    )
+    default = DistributedRamanFiber(**common)
+    explicit = DistributedRamanFiber(depletion_model="scalar", **common)
+    assert default.depletion_model == "scalar"
+    assert default.spectral_bins == 256
+    assert "scalar" in DEPLETION_MODELS and "spectral" in DEPLETION_MODELS
+
+    default_out = default.forward(signal)
+    explicit_out = explicit.forward(signal)
+    assert np.array_equal(default_out.data, explicit_out.data)
+    assert np.array_equal(default._depleted_pump_power, explicit._depleted_pump_power)
+    assert np.array_equal(default._depleted_signal_power, explicit._depleted_signal_power)
+    assert default._depletion_diagnostics["spectral_bins"] is None
+    assert default_out.ctx.meta["dra_depletion_model"] == "scalar"
+    assert default_out.ctx.meta["dra_spectral_bins"] is None
+
+
+def test_spectral_narrowband_matches_scalar() -> None:
+    """100 GHz 窄带信号下，逐频箱口径应退化到标量口径（<0.1%）。"""
+    signal = _signal(n_samples=1024, sample_rate_hz=100e9, power_w=5e-2, seed=5)
+    residuals = {}
+    outputs = {}
+    for model in ("scalar", "spectral"):
+        fiber = DistributedRamanFiber(
+            pumps=PumpSpec(1450.0, 0.2, "forward"),
+            pump_model="depleted",
+            depletion_model=model,
+            **_fiber_kwargs(coarse_step_size_m=2000.0),
+        )
+        output = fiber.forward(signal)
+        residuals[model] = float(fiber.pump_power_w(fiber.length_m)[0])
+        outputs[model] = _output_power_w(output)
+    assert np.isclose(residuals["spectral"], residuals["scalar"], rtol=1e-3)
+    assert np.isclose(outputs["spectral"], outputs["scalar"], rtol=1e-3)
+
+
+def test_spectral_bins_normalise_power_and_drop_empty_bins() -> None:
+    """频箱权重和为 1，总功率可还原；空信号退化为单箱。"""
+    signal = _signal(n_samples=1024, sample_rate_hz=100e9, seed=3)
+    freqs, weights = signal_spectrum_bins(
+        signal.data, signal.ctx.sample_rate, signal.ctx.center_freq, 64
+    )
+    assert freqs.shape == weights.shape
+    assert 1 <= freqs.size <= 64
+    assert np.isclose(np.sum(weights), 1.0)
+    assert np.all(freqs > 0.0)
+    assert np.all(weights > 0.0)
+
+    freqs0, weights0 = signal_spectrum_bins(
+        np.zeros_like(signal.data), signal.ctx.sample_rate, signal.ctx.center_freq, 64
+    )
+    assert freqs0.size == 1 and weights0[0] == 1.0
+
+
+def test_spectral_energy_and_photon_balance() -> None:
+    """谱域耗尽：逐箱功率、逐泵能量账与光子数账都必须闭合。"""
+    signal = _signal(n_samples=2048, sample_rate_hz=100e9, power_w=5e-3, seed=7)
+    fiber = DistributedRamanFiber(
+        pumps=PumpSpec(1450.0, 0.2, "forward"),
+        pump_model="depleted",
+        depletion_model="spectral",
+        spectral_bins=128,
+        **_fiber_kwargs(coarse_step_size_m=2000.0),
+    )
+    input_power_w = float(np.sum(np.mean(np.abs(signal.data) ** 2, axis=1)))
+    freqs, weights = signal_spectrum_bins(
+        signal.data, signal.ctx.sample_rate, signal.ctx.center_freq, 128
+    )
+    z, profile, ps, diagnostics = fiber._solve_depleted_profiles(
+        input_power_w,
+        signal.ctx.center_freq,
+        bin_freqs_hz=freqs,
+        bin_weights=weights,
+    )
+
+    assert diagnostics["depletion_model"] == "spectral"
+    assert diagnostics["spectral_bins"] == freqs.size
+    assert diagnostics["converged"] is True
+    assert ps.shape == (freqs.size, z.size)
+    assert np.all(ps >= 0.0)
+    assert np.all(profile >= 0.0)
+    # 总输入功率按权重分配，逐箱初值求和 = input_power_w。
+    assert np.isclose(np.sum(ps[:, 0]), input_power_w, rtol=1e-12)
+    assert np.isclose(diagnostics["signal_out_w"], float(np.sum(ps[:, -1])), rtol=1e-12)
+
+    for pump in diagnostics["pumps"]:
+        balance = (
+            pump["launch_power_w"]
+            - pump["residual_power_w"]
+            - pump["passive_loss_w"]
+            - pump["transferred_to_signal_w"]
+            + pump["pump_pump_net_w"]
+        )
+        assert abs(balance) < 1e-6
+
+    # 逐箱光子数守恒：Σ_b ΔP_b/f_b = Σ_p transfer_p/f_p。
+    assert np.isclose(
+        diagnostics["signal_photon_gain_per_s"],
+        diagnostics["pump_photon_transfer_per_s"],
+        rtol=1e-9,
+    )
+    assert diagnostics["signal_raman_gain_w"] > 0.0
+
+    # ODE 的总信号输出必须与 SSFM 实际输出同口径（差别只来自损耗/色散细节）。
+    output = fiber.forward(signal)
+    ssfm_total = float(np.sum(np.mean(np.abs(output.data) ** 2, axis=1)))
+    assert np.isclose(diagnostics["signal_out_w"], ssfm_total, rtol=2e-2)
+
+
+def test_spectral_is_required_for_pump_pump() -> None:
+    """泵浦-泵浦转移必须显式启用谱域耗尽，不能静默用标量驱动。"""
+    with pytest.raises(ValueError, match="spectral"):
+        DistributedRamanFiber(
+            pumps=[PumpSpec(1360.0, 0.2, "forward"), PumpSpec(1450.0, 0.2, "forward")],
+            pump_model="depleted",
+            pump_pump_raman=True,
+            **_fiber_kwargs(),
+        )
+    with pytest.raises(ValueError, match="spectral_bins"):
+        DistributedRamanFiber(
+            pumps=PumpSpec(1450.0, 0.2, "forward"),
+            pump_model="depleted",
+            depletion_model="spectral",
+            spectral_bins=0,
+            **_fiber_kwargs(),
+        )
+
+
+def test_spectral_pump_pump_has_no_unphysical_amplification() -> None:
+    """六泵后向 + 谱域 + pp：总输出必须低于泵浦+信号总注入，能量账闭合。"""
+    generator = _load_generator()
+    pumps = generator.WIDEBAND_CONFIGS["cl152"]["bwd_sixpumps"]
+    signal = _signal(n_samples=512, sample_rate_hz=100e9, center_freq_hz=190.15e12)
+    fiber = generator.make_wideband_fiber(
+        pumps,
+        nonlinear=True,
+        pump_model="depleted",
+        coarse_step_m=100.0,
+        depletion_model="spectral",
+        pump_pump_raman=True,
+    )
+    fiber.depleted_step_m = 100.0
+    fiber.depleted_max_iterations = 128
+    output = fiber.forward(signal)
+    balance = output.ctx.meta["dra_pump_energy_balance"]
+
+    assert balance["converged"] is True
+    assert balance["depletion_model"] == "spectral"
+    assert balance["spectral_bins"] is not None
+    assert balance["signal_out_w"] < sum(pump.power_w for pump in pumps)
+    assert np.all(fiber._depleted_pump_power >= 0.0)
+    for pump in balance["pumps"]:
+        residual = (
+            pump["launch_power_w"]
+            - pump["residual_power_w"]
+            - pump["passive_loss_w"]
+            - pump["transferred_to_signal_w"]
+            + pump["pump_pump_net_w"]
+        )
+        assert abs(residual) < 1e-4 * max(pump.power_w for pump in pumps)
+
+
+def _multichannel_signal(
+    n_channels: int = 5,
+    *,
+    spacing_hz: float = 100e9,
+    power_per_channel_w: float = 1e-3,
+    n_samples: int = 512,
+    sample_rate_hz: float = 1.6e12,
+    center_freq_hz: float = 193.1e12,
+    seed: int = 0,
+) -> Signal:
+    """构造 ``n_channels`` 个等间隔单音（每信道每偏振 ``power_per_channel_w``）。"""
+    rng = np.random.default_rng(seed)
+    t = np.arange(n_samples) / sample_rate_hz
+    offsets = (np.arange(n_channels) - (n_channels - 1) / 2.0) * spacing_hz
+    data = np.zeros((2, n_samples), dtype=np.complex128)
+    amplitude = np.sqrt(power_per_channel_w)
+    for offset in offsets:
+        phase = rng.uniform(0.0, 2 * np.pi, size=(2, 1))
+        data += amplitude * np.exp(1j * (2 * np.pi * offset * t + phase))
+    ctx = SignalContext(
+        sample_rate=sample_rate_hz,
+        center_freq=center_freq_hz,
+        n_pol=2,
+        sps=4,
+        sym_rate=sample_rate_hz / 4,
+    )
+    return Signal(data.astype(np.complex64), ctx)
+
+
+def test_spectral_multichannel_mixed_pumps_energy_balance() -> None:
+    """3–8 信道、前向+后向泵：频箱功率、能量账与光子账都闭合。"""
+    signal = _multichannel_signal(n_channels=5)
+    pumps = [
+        PumpSpec(1450.0, 0.2, "forward"),
+        PumpSpec(1460.0, 0.1, "backward"),
+    ]
+    fiber = DistributedRamanFiber(
+        pumps=pumps,
+        pump_model="depleted",
+        depletion_model="spectral",
+        spectral_bins=64,
+        depleted_step_m=100.0,
+        **_fiber_kwargs(length_m=100e3, coarse_step_size_m=2000.0),
+    )
+    input_power_w = float(np.sum(np.mean(np.abs(signal.data) ** 2, axis=1)))
+    freqs, weights = signal_spectrum_bins(
+        signal.data, signal.ctx.sample_rate, signal.ctx.center_freq, 64
+    )
+    # 5 个单音占据主要频箱；complex64 的数值泄漏会带出少量邻近箱。
+    assert 5 <= freqs.size <= 64
+    dominant = np.argsort(weights)[-5:]
+    assert np.isclose(float(np.sum(weights[dominant])), 1.0, atol=1e-6)
+    z, profile, ps, diagnostics = fiber._solve_depleted_profiles(
+        input_power_w,
+        signal.ctx.center_freq,
+        bin_freqs_hz=freqs,
+        bin_weights=weights,
+    )
+
+    assert diagnostics["converged"] is True
+    assert ps.shape == (freqs.size, z.size)
+    assert np.isclose(np.sum(weights), 1.0)
+    assert np.isclose(np.sum(ps[:, 0]), input_power_w, rtol=1e-12)
+    assert np.all(ps >= 0.0)
+    assert np.all(profile >= 0.0)
+    assert diagnostics["signal_raman_gain_w"] > 0.0
+    for pump in diagnostics["pumps"]:
+        balance = (
+            pump["launch_power_w"]
+            - pump["residual_power_w"]
+            - pump["passive_loss_w"]
+            - pump["transferred_to_signal_w"]
+            + pump["pump_pump_net_w"]
+        )
+        assert abs(balance) < 1e-5
+    assert np.isclose(
+        diagnostics["signal_photon_gain_per_s"],
+        diagnostics["pump_photon_transfer_per_s"],
+        rtol=1e-9,
+    )
+
+
 def test_pump_pump_raman_requires_depleted_model() -> None:
     """泵浦-泵浦转移只对耗尽模型有定义；未耗尽时必须显式报错而不是静默忽略。"""
     with pytest.raises(ValueError, match="depleted"):
@@ -598,7 +849,10 @@ def test_pump_pump_default_off_matches_explicit_off_for_six_backward_pumps() -> 
     assert np.array_equal(default._depleted_pump_power, explicit._depleted_pump_power)
     assert np.array_equal(default._depleted_signal_power, explicit._depleted_signal_power)
     # 6 个泵都已耦合，打开开关必须改变结果，否则测试没有意义。
-    enabled = generator.make_wideband_fiber(pumps, pump_pump_raman=True, **common)
+    # 泵浦-泵浦转移要求谱域耗尽驱动（标量驱动会低估耗尽，见 §13.9）。
+    enabled = generator.make_wideband_fiber(
+        pumps, pump_pump_raman=True, depletion_model="spectral", **common
+    )
     enabled.depleted_step_m = 100.0
     enabled_out = enabled.forward(signal)
     assert not np.array_equal(default_out.data, enabled_out.data)
@@ -613,7 +867,11 @@ def _two_pump_profiles(
     alpha_db_per_km: float = 0.2,
     input_power_w: float = 1e-25,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
-    """跑两个前向泵 + 极弱信号的耗尽剖面，返回 (泵浦剖面, z, 能量账)。"""
+    """跑两个前向泵 + 极弱信号的耗尽剖面，返回 (泵浦剖面, z, 能量账)。
+
+    泵浦-泵浦转移只允许谱域耗尽；这里信号退化为单个 1550 nm 频箱，
+    因此与标量口径的耦合系数逐点相同。
+    """
     pumps = [
         PumpSpec(wavelength, power, "forward", alpha_db_per_km)
         for wavelength, power in zip(wavelengths_nm, powers_w, strict=True)
@@ -622,11 +880,15 @@ def _two_pump_profiles(
         pumps=pumps,
         pump_model="depleted",
         pump_pump_raman=pump_pump_raman,
+        depletion_model="spectral",
         depleted_step_m=step_m,
         **_fiber_kwargs(length_m=80e3, alpha_db_per_km=alpha_db_per_km),
     )
     z, profile, _, diagnostics = fiber._solve_depleted_profiles(
-        input_power_w, c / 1550e-9
+        input_power_w,
+        c / 1550e-9,
+        bin_freqs_hz=np.array([c / 1550e-9]),
+        bin_weights=np.array([1.0]),
     )
     return profile, z, diagnostics
 
@@ -700,9 +962,13 @@ def test_pump_pump_six_backward_pumps_converge_and_move_power() -> None:
     signal = _signal(n_samples=512, sample_rate_hz=100e9, center_freq_hz=190.15e12)
     common = {"nonlinear": True, "pump_model": "depleted", "coarse_step_m": 100.0}
     reference = generator.make_wideband_fiber(pumps, **common)
-    enabled = generator.make_wideband_fiber(pumps, pump_pump_raman=True, **common)
+    enabled = generator.make_wideband_fiber(
+        pumps, pump_pump_raman=True, depletion_model="spectral", **common
+    )
     for fiber in (reference, enabled):
         fiber.depleted_step_m = 100.0
+    # 谱域 + pp 的六泵后向不动点需要更多迭代（实测 29 次）。
+    enabled.depleted_max_iterations = 128
     reference_out = reference.forward(signal)
     enabled_out = enabled.forward(signal)
 
