@@ -22,7 +22,9 @@
         --output examples/dra_reference_wide/diagnostics/profile_diagnosis.json
 
 ``--pump-pump`` 打开物理侧的泵浦-泵浦拉曼转移（默认关闭，输出与已提交
-JSON 数值一致，只多 ``pump_pump_raman`` 与三项能量账字段）。
+JSON 数值一致，只多 ``pump_pump_raman`` 与三项能量账字段）。泵浦-泵浦
+转移要求谱域耗尽驱动，因此 ``--pump-pump`` 在未显式指定
+``--depletion-model`` 时默认用 ``spectral``；显式给 ``scalar`` 会报错。
 """
 
 from __future__ import annotations
@@ -118,8 +120,11 @@ def _pump_specs(metadata: dict, config: str):
 def _physics_profiles(metadata: dict, config: str, waveform: np.ndarray, coupling: str, extra: dict):
     """物理耗尽模型：返回归一化 z 网格上的泵浦/信号剖面与能量账。"""
     from physics_nlo_eval.channel import DistributedRamanFiber  # noqa: PLC0415
+    from physics_nlo_eval.channel.dra import signal_spectrum_bins  # noqa: PLC0415
 
     specs, _ = _pump_specs(metadata, config)
+    depletion_model = str(extra.get("depletion_model", "scalar"))
+    spectral_bins = int(extra.get("spectral_bins", 256))
     fiber = DistributedRamanFiber(
         length_m=float(metadata["fiber"]["length_km"]) * 1e3,
         alpha_db_per_km=float(metadata["fiber"]["alpha_db_per_km"]),
@@ -130,6 +135,8 @@ def _physics_profiles(metadata: dict, config: str, waveform: np.ndarray, couplin
         n2_si=0.0,
         a_eff_um2=float(metadata["fiber"]["a_eff_um2"]),
         pump_model="depleted",
+        depletion_model=depletion_model,
+        spectral_bins=spectral_bins,
         depleted_max_iterations=int(extra.get("iterations", 8)),
         depletion_coupling=coupling,
         pump_pump_raman=bool(extra.get("pump_pump", False)),
@@ -137,9 +144,18 @@ def _physics_profiles(metadata: dict, config: str, waveform: np.ndarray, couplin
     input_power_w = float(np.sum(np.mean(np.abs(waveform) ** 2, axis=1)))
     band_freqs_hz = None
     band_weights = None
-    if coupling == "band_average":
-        n_samples = waveform.shape[-1]
-        sample_rate = float(metadata["plan"]["sample_rate_hz"])
+    bin_freqs_hz = None
+    bin_weights = None
+    n_samples = waveform.shape[-1]
+    sample_rate = float(metadata["plan"]["sample_rate_hz"])
+    if depletion_model == "spectral":
+        bin_freqs_hz, bin_weights = signal_spectrum_bins(
+            waveform,
+            sample_rate,
+            float(metadata["plan"]["center_frequency_hz"]),
+            spectral_bins,
+        )
+    elif coupling == "band_average":
         freq_scale = n_samples / (n_samples - 1) if n_samples > 1 else 1.0
         band_freqs_hz = float(metadata["plan"]["center_frequency_hz"]) + np.fft.fftfreq(
             n_samples, d=1.0 / sample_rate
@@ -152,16 +168,36 @@ def _physics_profiles(metadata: dict, config: str, waveform: np.ndarray, couplin
         float(metadata["plan"]["center_frequency_hz"]),
         band_freqs_hz=band_freqs_hz,
         band_weights=band_weights,
+        bin_freqs_hz=bin_freqs_hz,
+        bin_weights=bin_weights,
     )
     # 让 on_off_gain() 能读到本次求解的剖面（forward() 之外不会自动写入）。
     fiber._depleted_pump_z = z
     fiber._depleted_pump_power = profile
+
+    if ps.ndim == 2:
+        # 谱域：中心信道的近似剖面 = 落在中心信道占用带宽内的频箱之和。
+        spacing = float(metadata["plan"]["channel_spacing_hz"])
+        center = float(metadata["plan"]["center_frequency_hz"])
+        mask = np.abs(bin_freqs_hz - center) <= 0.5 * spacing
+        if not np.any(mask):
+            mask = np.zeros_like(bin_freqs_hz, dtype=bool)
+            mask[int(np.argmin(np.abs(bin_freqs_hz - center)))] = True
+        signal_center_w = ps[mask].sum(axis=0)
+        signal_total_w = ps.sum(axis=0)
+    else:
+        signal_center_w = ps
+        signal_total_w = ps
+        bin_freqs_hz = None
     return {
         "fiber": fiber,
         "z_m": z,
         "pump_total_w": profile.sum(axis=0),
         "pump_w": profile,
-        "signal_w": ps,
+        "signal_w": signal_center_w,
+        "signal_total_w": signal_total_w,
+        "signal_bins_w": ps if ps.ndim == 2 else None,
+        "bin_freqs_hz": bin_freqs_hz,
         "diagnostics": diagnostics,
         "pump_final_w": np.array(
             [
@@ -359,6 +395,8 @@ def _waveform_snr(metadata: dict, config: str, waveform: np.ndarray, coupling: s
         float(offsets[center]),
         float(plan["symbol_rate_hz"]),
     )
+    ssfm_total_out_w = float(np.sum(np.mean(np.abs(nonlinear.data) ** 2, axis=1)))
+    linear_total_out_w = float(np.sum(np.mean(np.abs(linear) ** 2, axis=1)))
     return {
         "center_channel_index": center,
         "signal_power_w": float(power),
@@ -367,6 +405,8 @@ def _waveform_snr(metadata: dict, config: str, waveform: np.ndarray, coupling: s
         "common_gain_db": float(common_gain_db),
         "snr_nli_db": float(10 * np.log10(power / nli)) if nli > 0 else None,
         "linear_model": "exact_frequency_domain",
+        "ssfm_total_output_w": ssfm_total_out_w,
+        "linear_total_output_w": linear_total_out_w,
     }
 
 
@@ -526,6 +566,12 @@ def _case(plan: str, config: str, data_dir: Path, coupling: str, extra: dict, ne
         "plan": plan,
         "config": config,
         "depletion_coupling": coupling,
+        "depletion_model": str(extra.get("depletion_model", "scalar")),
+        "spectral_bins": (
+            int(physics["diagnostics"]["spectral_bins"])
+            if physics["diagnostics"].get("spectral_bins")
+            else None
+        ),
         "n_channels": int(metadata["plan"]["n_channels"]),
         "input_power_w": input_power_w,
         "center_frequency_hz": float(metadata["plan"]["center_frequency_hz"]),
@@ -554,7 +600,16 @@ def _case(plan: str, config: str, data_dir: Path, coupling: str, extra: dict, ne
                 float(p["pump_pump_net_w"]) for p in physics["diagnostics"]["pumps"]
             ],
             "pump_pump_net_total_w": float(physics["diagnostics"]["pump_pump_net_total_w"]),
-            "signal_out_w": float(physics["signal_w"][-1]),
+            "signal_raman_gain_w": float(physics["diagnostics"]["signal_raman_gain_w"]),
+            "signal_out_w": float(physics["signal_total_w"][-1]),
+            "signal_center_out_w": float(physics["signal_w"][-1]),
+            "spectral_bins": physics["diagnostics"].get("spectral_bins"),
+            "signal_photon_gain_per_s": physics["diagnostics"].get(
+                "signal_photon_gain_per_s"
+            ),
+            "pump_photon_transfer_per_s": physics["diagnostics"].get(
+                "pump_photon_transfer_per_s"
+            ),
             "on_off_gain_db": {
                 "center": float(physics_on_off_db[0]),
                 "low": float(physics_on_off_db[1]),
@@ -649,6 +704,9 @@ def _case(plan: str, config: str, data_dir: Path, coupling: str, extra: dict, ne
             "reference_waveform_snr_nli_db": reference_snr,
             "waveform_snr_nli_db": waveform_snr["snr_nli_db"],
             "waveform_shift_vs_reference_db": float(waveform_snr["snr_nli_db"] - reference_snr),
+            "physics_signal_out_w": float(physics["signal_total_w"][-1]),
+            "ssfm_total_output_w": waveform_snr["ssfm_total_output_w"],
+            "linear_total_output_w": waveform_snr["linear_total_output_w"],
             "analytic": analytic_snr,
             "residual_db": {
                 factor: float(row["snr_nli_db"] - waveform_snr["snr_nli_db"])
@@ -670,16 +728,33 @@ def main(argv: list[str] | None = None) -> int:
         default=["cl152:bwd_sixpumps", "cl152:fwd_0p20w", "c57:bwd_0p20w", "c57:fwd_0p20w"],
     )
     parser.add_argument("--coupling", default="center", help="物理侧 depletion_coupling")
+    parser.add_argument(
+        "--depletion-model",
+        choices=("scalar", "spectral"),
+        default=None,
+        help="物理侧耗尽信号驱动口径；默认 scalar，--pump-pump 时默认 spectral",
+    )
+    parser.add_argument(
+        "--spectral-bins", type=int, default=256, help="谱域耗尽模型的频箱数"
+    )
     parser.add_argument("--iterations", type=int, default=8, help="物理耗尽模型不动点迭代上限")
     parser.add_argument("--step-m", type=float, default=None, help="覆盖物理侧 SSFM 步长 (m)")
     parser.add_argument("--snr", action="store_true", help="额外跑一次 SSFM，给出中心信道 SNR")
     parser.add_argument(
         "--pump-pump",
         action="store_true",
-        help="物理侧打开 pump_pump_raman（默认关闭，保持与参考数据逐位一致）",
+        help="物理侧打开 pump_pump_raman（默认关闭；需要谱域耗尽）",
     )
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args(argv)
+
+    depletion_model = args.depletion_model
+    if depletion_model is None:
+        depletion_model = "spectral" if args.pump_pump else "scalar"
+    if args.pump_pump and depletion_model != "spectral":
+        parser.error("--pump-pump requires --depletion-model spectral")
+    if args.spectral_bins < 1:
+        parser.error("--spectral-bins must be positive")
 
     network = _import_network(args.network_repo)
     cases = []
@@ -695,13 +770,16 @@ def main(argv: list[str] | None = None) -> int:
                 "snr": args.snr,
                 "step_m": args.step_m,
                 "pump_pump": args.pump_pump,
+                "depletion_model": depletion_model,
+                "spectral_bins": args.spectral_bins,
             },
             network,
         )
         cases.append(row)
         physics = row["physics"]
         print(
-            f"{tag:22s} phys pump residual {np.sum(physics['pump_residual_w']):.6g} W "
+            f"{tag:22s} model={row['depletion_model']:8s} "
+            f"phys pump residual {np.sum(physics['pump_residual_w']):.6g} W "
             f"signal_out {physics['signal_out_w']:.6g} W conv={physics['depletion_converged']} "
             f"pp_net {physics['pump_pump_net_total_w']:.6g} W"
         )

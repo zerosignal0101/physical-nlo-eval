@@ -7,7 +7,12 @@ from physics_nlo_eval.channel.assessment import (
     assess_fiber_nonlinearity,
     fiber_nonlinearity_assessment,
 )
-from physics_nlo_eval.channel.dra import DistributedRamanFiber, raman_gain_spectrum
+from physics_nlo_eval.channel.dra import (
+    DEPLETION_MODELS,
+    DistributedRamanFiber,
+    raman_gain_spectrum,
+    signal_spectrum_bins,
+)
 from physics_nlo_eval.channel.fiber import EDFA, FiberChannel, IdealAmplifier
 from physics_nlo_eval.channel.network import ROADM, PumpSpec, RamanPump
 from physics_nlo_eval.channel.wdm import ChannelExtractor, ChannelSpec, WDMDemux, WDMMux, WDMPlan
@@ -15,6 +20,7 @@ from physics_nlo_eval.channel.wdm import ChannelExtractor, ChannelSpec, WDMDemux
 __all__ = [
     "ChannelExtractor",
     "ChannelSpec",
+    "DEPLETION_MODELS",
     "DistributedRamanFiber",
     "EDFA",
     "FiberChannel",
@@ -31,4 +37,5 @@ __all__ = [
     "assess_fiber_nonlinearity",
     "fiber_nonlinearity_assessment",
     "raman_gain_spectrum",
+    "signal_spectrum_bins",
 ]

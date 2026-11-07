@@ -9,12 +9,15 @@
 
 * 支持两种泵浦模型：``"undepleted"``（默认）泵浦功率沿 z 解析衰减，不受
   信号和泵浦间相互作用影响；``"depleted"`` 在 SSFM 步进之外用 RK4 积分
-  泵浦-信号功率耦合方程，泵浦按局部信号功率（两个偏振合计的带内总功率）
-  被耗尽，信号增益使用局部泵浦功率，后向泵用不动点迭代求解边值问题；
-  耗尽耦合系数默认取信号中心频率，也可选 ``depletion_coupling="band_average"``
-  用带内功率谱加权平均（见 ``docs/dra-waveform.md`` §13）；
-* 泵浦之间默认无耦合；``pump_pump_raman=True``（只对 ``"depleted"`` 有效）
-  时按成对光子数守恒加入泵浦-泵浦拉曼转移（见 ``docs/dra-waveform.md`` §13.8）；
+  泵浦-信号功率耦合方程，泵浦按局部信号功率被耗尽，信号增益使用局部泵浦
+  功率，后向泵用不动点迭代求解边值问题。耗尽模型的信号驱动有两种口径
+  （``depletion_model``）：``"scalar"``（默认）用带内总功率标量，
+  ``"spectral"`` 用逐频箱功率分布，与 SSFM 的逐频率增益同口径；标量口径
+  还可选 ``depletion_coupling="band_average"`` 用带内功率谱加权平均
+  （见 ``docs/dra-waveform.md`` §13）；
+* 泵浦之间默认无耦合；``pump_pump_raman=True``（只对 ``"depleted"`` 且
+  ``depletion_model="spectral"`` 有效）时按成对光子数守恒加入泵浦-泵浦
+  拉曼转移（见 ``docs/dra-waveform.md`` §13.8/§13.9）；
 * 信号拉曼增益采用 Gaussian 近似谱 ``g_R(f_p - f_s)``；
 * 信号自身的损耗、色散、Kerr 非线性仍由原有 SSFM 处理；
 * 通道间 ISRS 默认不建模；若传入 ``raman_r3``，则由原有 SSFM 的
@@ -41,7 +44,13 @@ DEFAULT_RAMAN_FWHM_HZ = DEFAULT_RAMAN_SIGMA_HZ * np.sqrt(8 * np.log(2))
 DEFAULT_RAMAN_PEAK_GAIN_M_PER_W = 6e-14
 #: 支持的泵浦模型。
 PUMP_MODELS = ("undepleted", "depleted")
-#: 耗尽模型里泵浦-信号耦合系数的取法。
+#: 耗尽方程里信号驱动项的取法。
+#:
+#: * ``"scalar"``：历史口径，信号压成一个带内总功率标量；
+#: * ``"spectral"``：逐频箱保留信号功率分布，泵浦 ODE 与 SSFM 的逐频率
+#:   增益同口径。
+DEPLETION_MODELS = ("scalar", "spectral")
+#: 标量耗尽模型里泵浦-信号耦合系数的取法（``"spectral"`` 不使用）。
 DEPLETION_COUPLINGS = ("center", "band_average")
 
 # NumPy 2.0 把 ``trapz`` 改名为 ``trapezoid``；本仓仍兼容 1.x。
@@ -74,6 +83,78 @@ def raman_gain_spectrum(
     sigma_hz = fwhm_hz / np.sqrt(8 * np.log(2))
     shift = np.asarray(shift_hz, dtype=float)
     return np.exp(-0.5 * ((shift - peak_shift_hz) / sigma_hz) ** 2)
+
+
+def signal_spectrum_bins(
+    waveform: np.ndarray,
+    sample_rate_hz: float,
+    center_freq_hz: float,
+    n_bins: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """把输入波形的 FFT 功率谱聚合成频箱，供谱域耗尽模型使用。
+
+    频率轴与 SSFM 完全一致
+    （``center_freq + fftfreq(n, 1/fs) · n/(n−1)``），功率谱取 ``|FFT|²``
+    沿偏振轴的均值。随后把频率轴等宽切成 ``n_bins`` 个箱，只保留
+    有功率的箱；每箱用**功率加权平均频率**代表，权重归一化到 1。
+
+    Parameters
+    ----------
+    waveform : ndarray
+        输入波形，形状 ``(n_pol, n_samples)``。
+    sample_rate_hz : float
+        采样率 (Hz)。
+    center_freq_hz : float
+        中心光频率 (Hz)。
+    n_bins : int
+        频箱数量，必须为正。
+
+    Returns
+    -------
+    bin_freqs_hz : ndarray
+        每个有效频箱的功率加权平均频率 (Hz)，形状 ``(n_bins_eff,)``。
+    bin_weights : ndarray
+        归一化到 1 的功率权重，形状 ``(n_bins_eff,)``。总信号功率为
+        ``input_power_w · bin_weights``。
+
+    Notes
+    -----
+    ``input_power_w = sum(mean(|A|², axis=1))``；FFT 功率谱只用来给出
+    **形状**（各箱相对权重），因此 Parseval 常数不影响归一化。空箱
+    （功率严格为 0）会被丢弃；全零信号退化为中心频率单箱。
+    """
+    if n_bins < 1:
+        raise ValueError("n_bins must be positive.")
+    data = np.asarray(waveform)
+    n_samples = data.shape[-1]
+    freq_scale = n_samples / (n_samples - 1) if n_samples > 1 else 1.0
+    freqs = float(center_freq_hz) + np.fft.fftfreq(
+        n_samples, d=1.0 / float(sample_rate_hz)
+    ) * freq_scale
+    spectrum = np.mean(np.abs(np.fft.fft(data, axis=-1)) ** 2, axis=0)
+    total = float(np.sum(spectrum))
+    if total <= 0.0 or n_samples < 2:
+        return np.array([float(center_freq_hz)]), np.array([1.0])
+
+    fmin = float(np.min(freqs))
+    fmax = float(np.max(freqs))
+    if n_bins == 1 or fmax <= fmin:
+        weighted = float(np.dot(freqs, spectrum)) / total
+        return np.array([weighted]), np.array([1.0])
+
+    edges = np.linspace(fmin, fmax, n_bins + 1)
+    # 内边界用 digitize；最大频率必须归入最后一箱。
+    index = np.clip(
+        np.digitize(freqs, edges[1:-1], right=False), 0, n_bins - 1
+    )
+    power = np.bincount(index, weights=spectrum, minlength=n_bins)
+    occupied = power > 0.0
+    if not np.any(occupied):
+        return np.array([float(center_freq_hz)]), np.array([1.0])
+    weighted = np.bincount(index, weights=spectrum * freqs, minlength=n_bins)
+    bin_freqs = weighted[occupied] / power[occupied]
+    bin_weights = power[occupied] / float(np.sum(power[occupied]))
+    return bin_freqs, bin_weights
 
 
 class DistributedRamanFiber(FiberChannel):
@@ -120,7 +201,7 @@ class DistributedRamanFiber(FiberChannel):
     depleted_tolerance : float, optional
         不动点迭代的相对收敛阈值（相对各泵浦标称功率与输入信号功率）。
     depletion_coupling : str, optional
-        耗尽方程里泵浦-信号耦合系数 ``γ_p`` 的取法：
+        标量耗尽模型里泵浦-信号耦合系数 ``γ_p`` 的取法：
 
         * ``"center"``（默认）：取信号中心频率的 ``γ_p``。这是历史口径，
           与既有参考数据逐位一致；
@@ -129,12 +210,32 @@ class DistributedRamanFiber(FiberChannel):
           趋于一致；宽带时中心频率可能落在拉曼峰上或远离峰值，两者差别
           可达 1–2 dB（见 ``docs/dra-waveform.md`` 的剖面诊断一节）。
 
-        该参数只改变泵浦 ODE 的驱动系数，信号增益仍逐频率施加。
+        该参数只对 ``depletion_model="scalar"`` 有意义；``"spectral"`` 时
+        直接由逐频箱的 ``γ_{p,b}`` 驱动，``depletion_coupling`` 被忽略，
+        元数据里记为 ``None`` 并显式注明。
+    depletion_model : str, optional
+        泵浦耗尽方程的**信号驱动口径**：
+
+        * ``"scalar"``（默认）：信号压成一个带内总功率标量 ``P_s(z)``，
+          泵浦耗尽量用中心频率或带内平均耦合（见 ``depletion_coupling``）。
+          与历史参考数据逐位一致；
+        * ``"spectral"``：把输入信号功率谱聚合成 ``spectral_bins`` 个频箱，
+          每个频箱独立演化 ``P_{s,b}(z)``，泵浦行按
+          ``Σ_b (f_p/f_b) γ_{p,b} P_{s,b}`` 耗尽。这样泵浦 ODE 与 SSFM 的
+          逐频率增益严格同口径，是启用 ``pump_pump_raman`` 的前提。
+
+        只对 ``pump_model="depleted"`` 生效。
+    spectral_bins : int, optional
+        谱域耗尽模型的频箱数，默认 256，必须为正。箱按频率等宽划分，
+        每箱以功率加权平均频率代表，空箱丢弃（权重为 0）。
     pump_pump_raman : bool, optional
         是否在耗尽模型里计入泵浦-泵浦拉曼转移。默认 ``False``，此时泵浦 ODE
         与历史参考数据逐位一致。只对 ``pump_model="depleted"`` 生效；与
         ``pump_model="undepleted"`` 同时使用会显式报错（未耗尽剖面是解析
-        衰减，没有可以加转移项的状态量），而不是静默忽略。
+        衰减，没有可以加转移项的状态量），而不是静默忽略。另要求
+        ``depletion_model="spectral"``：标量信号驱动会低估强增益信道对
+        泵浦的耗尽，打开泵浦-泵浦转移后会把这一缺陷放大（见
+        ``docs/dra-waveform.md`` §13.8/§13.9）。
 
         每一对泵 ``(i, j)``（``f_i > f_j``）用成对光子数守恒的形式::
 
@@ -183,6 +284,8 @@ class DistributedRamanFiber(FiberChannel):
         depleted_max_iterations: int = 8,
         depleted_tolerance: float = 1e-8,
         depletion_coupling: str = "center",
+        depletion_model: str = "scalar",
+        spectral_bins: int = 256,
         pump_pump_raman: bool = False,
         add_ase: bool = False,
         ase_spontaneous_factor: float = 1.0,
@@ -227,10 +330,31 @@ class DistributedRamanFiber(FiberChannel):
                 f"depletion_coupling must be one of {DEPLETION_COUPLINGS}, "
                 f"got {depletion_coupling!r}."
             )
+        if depletion_model not in DEPLETION_MODELS:
+            raise ValueError(
+                f"depletion_model must be one of {DEPLETION_MODELS}, "
+                f"got {depletion_model!r}."
+            )
+        if int(spectral_bins) < 1:
+            raise ValueError("spectral_bins must be a positive integer.")
         if pump_pump_raman and pump_model != "depleted":
             raise ValueError(
                 "pump_pump_raman=True requires pump_model='depleted': the undepleted "
                 "pump profile is analytic and has no pump state to couple."
+            )
+        if pump_pump_raman and depletion_model != "spectral":
+            raise ValueError(
+                "pump_pump_raman=True requires depletion_model='spectral': the scalar "
+                "depletion drive only knows the in-band total signal power and "
+                "under-estimates pump depletion when per-channel gain slopes are steep. "
+                "Enable the per-bin ('spectral') depletion drive first."
+            )
+        if depletion_model == "spectral" and depletion_coupling != "center":
+            warnings.warn(
+                "depletion_model='spectral' drives the pump ODE per frequency bin; "
+                "depletion_coupling is ignored (the per-bin gamma is used instead).",
+                RuntimeWarning,
+                stacklevel=2,
             )
 
         if pumps is None:
@@ -248,6 +372,8 @@ class DistributedRamanFiber(FiberChannel):
         self.depleted_max_iterations = depleted_max_iterations
         self.depleted_tolerance = depleted_tolerance
         self.depletion_coupling = depletion_coupling
+        self.depletion_model = depletion_model
+        self.spectral_bins = int(spectral_bins)
         self.pump_pump_raman = bool(pump_pump_raman)
         self.add_ase = add_ase
         self.ase_spontaneous_factor = ase_spontaneous_factor
@@ -387,6 +513,26 @@ class DistributedRamanFiber(FiberChannel):
         average = spectral @ weights
         return self.raman_peak_gain_m_per_w * average / self.a_eff_si
 
+    def _pump_coupling_rates_spectrum(
+        self, bin_freqs_hz: np.ndarray
+    ) -> np.ndarray:
+        """逐频箱的泵浦-信号功率耦合系数 (1/(W·m))，形状 ``(n_pumps, n_bins)``。
+
+        返回 ``γ_{p,b} = g_peak · g̃_R(f_p − f_b) / A_eff``。这是谱域耗尽
+        模型的核心：每个频箱用自己的耦合系数，与 SSFM 在 ``f_b`` 处逐频率
+        施加的增益完全同口径。
+        """
+        freqs = np.asarray(bin_freqs_hz, dtype=float)
+        if not self.pumps:
+            return np.zeros((0, freqs.size), dtype=float)
+        pump_freqs = np.array([self._pump_frequency_hz(pump) for pump in self.pumps])
+        spectral = raman_gain_spectrum(
+            pump_freqs[:, None] - freqs[None, :],
+            peak_shift_hz=self.raman_peak_shift_hz,
+            fwhm_hz=self.raman_fwhm_hz,
+        )
+        return self.raman_peak_gain_m_per_w * spectral / self.a_eff_si
+
     def _pump_pump_coupling(self) -> np.ndarray | None:
         """泵浦-泵浦拉曼转移的耦合矩阵 (1/(W·m))。
 
@@ -434,11 +580,20 @@ class DistributedRamanFiber(FiberChannel):
         *,
         band_freqs_hz: np.ndarray | None = None,
         band_weights: np.ndarray | None = None,
+        bin_freqs_hz: np.ndarray | None = None,
+        bin_weights: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-        """求解泵浦-信号总功率耦合方程，返回泵浦剖面与能量账。
+        """求解泵浦-信号耦合方程，返回泵浦剖面与能量账。
 
-        状态量是各泵浦功率；信号只保留一个标量剖面——带内总功率（两个
-        偏振合计）。沿 +z 的耦合方程::
+        按 ``depletion_model`` 分派：
+
+        * ``"scalar"``（默认）走本节描述的标量带内总功率 ODE，数值路径与
+          历史参考数据逐位一致；
+        * ``"spectral"`` 走 :meth:`_solve_depleted_profiles_spectral`，
+          信号由 ``bin_freqs_hz`` / ``bin_weights`` 描述的逐频箱功率驱动。
+
+        标量模型的信号只保留一个剖面——带内总功率（两个偏振合计）。
+        沿 +z 的耦合方程::
 
             dP_s/dz = −α_s P_s + P_s · Σ_p γ_p P_p
             dP_p/dz = −s_p · [α_p P_p + (f_p/f_s) γ_p P_p P_s],  s_p = ±1
@@ -468,6 +623,18 @@ class DistributedRamanFiber(FiberChannel):
         的交叉项（前向泵 ↔ 后向泵）在两个方向各用对方的上一轮剖面，保持
         这一不动点结构。
         """
+        if self.depletion_model == "spectral":
+            if bin_freqs_hz is None or bin_weights is None:
+                raise ValueError(
+                    "depletion_model='spectral' requires bin_freqs_hz and bin_weights; "
+                    "use signal_spectrum_bins() to build them from the input waveform."
+                )
+            return self._solve_depleted_profiles_spectral(
+                input_power_w,
+                np.asarray(bin_freqs_hz, dtype=float),
+                np.asarray(bin_weights, dtype=float),
+            )
+
         n_steps = max(1, int(np.ceil(self.length_m / self.depleted_step_m)))
         dz = self.length_m / n_steps
         z = np.linspace(0.0, self.length_m, n_steps + 1)
@@ -611,6 +778,227 @@ class DistributedRamanFiber(FiberChannel):
             "pump_pump_raman": self.pump_pump_raman,
             # Σ 逐泵净收益 < 0：差额以声子能量离开光场。
             "pump_pump_net_total_w": float(np.sum(pp_net)),
+            # 新增诊断键；标量路径的数值不变。
+            "signal_out_w": float(ps[-1]),
+            "spectral_bins": None,
+            "depletion_model": "scalar",
+        }
+        return z, profile, ps, diagnostics
+
+    def _solve_depleted_profiles_spectral(
+        self,
+        input_power_w: float,
+        bin_freqs_hz: np.ndarray,
+        bin_weights: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+        """求解逐频箱的泵浦-信号耦合方程，返回泵浦剖面与能量账。
+
+        信号状态是 ``(n_bins,)`` 的功率向量，泵浦状态是 ``(n_pumps,)``。
+        沿 +z 的耦合方程::
+
+            dP_{s,b}/dz = (Σ_p γ_{p,b} P_p − α_s) P_{s,b}
+            dP_p/dz     = −s_p [α_p P_p
+                                 + P_p Σ_b (f_p/f_b) γ_{p,b} P_{s,b}
+                                 + P_p Σ_j C_{pj} P_j]
+
+        ``γ_{p,b}`` 见 :meth:`_pump_coupling_rates_spectrum`；``C`` 与标量
+        模型共用 :meth:`_pump_pump_coupling`（成对光子数守恒，符号/频率
+        因子不变）。初值用未耗尽泵浦剖面和逐箱速率积分得到，因此后向泵
+        第一次迭代就带上了信号的频谱分布，而不是退回标量初值。
+
+        能量账与标量模型口径一致：``transferred_to_signal_w[p]`` 是
+        ``∫ P_p Σ_b (f_p/f_b) γ_{p,b} P_{s,b} dz``；另有
+        ``signal_photon_gain_per_s`` 与 ``pump_photon_transfer_per_s``
+        用于核对逐箱光子数守恒。
+        """
+        bin_freqs = np.asarray(bin_freqs_hz, dtype=float)
+        bin_weights = np.asarray(bin_weights, dtype=float)
+        if bin_freqs.ndim != 1 or bin_freqs.shape != bin_weights.shape or bin_freqs.size == 0:
+            raise ValueError("bin_freqs_hz and bin_weights must be non-empty 1D arrays of equal length.")
+        if np.any(bin_freqs <= 0.0):
+            raise ValueError("bin_freqs_hz must be positive.")
+        total_weight = float(np.sum(bin_weights))
+        if total_weight <= 0.0:
+            raise ValueError("bin_weights must sum to a positive value.")
+        bin_weights = bin_weights / total_weight
+        n_bins = int(bin_freqs.size)
+
+        n_steps = max(1, int(np.ceil(self.length_m / self.depleted_step_m)))
+        dz = self.length_m / n_steps
+        z = np.linspace(0.0, self.length_m, n_steps + 1)
+
+        pump_freqs = np.array([self._pump_frequency_hz(pump) for pump in self.pumps])
+        alphas = np.array([self._pump_alpha_np_per_m(pump) for pump in self.pumps])
+        gamma = self._pump_coupling_rates_spectrum(bin_freqs)  # (n_pumps, n_bins)
+        # 泵浦行按光子数守恒放大 (f_p/f_b)，逐箱计算。
+        depletion_rate = gamma * (pump_freqs[:, None] / bin_freqs[None, :])
+        forward_mask = np.array(
+            [pump.direction == "forward" for pump in self.pumps], dtype=bool
+        )
+        fwd_idx = np.flatnonzero(forward_mask)
+        bwd_idx = np.flatnonzero(~forward_mask)
+        signs = np.where(forward_mask, 1.0, -1.0)
+        alpha_s = float(np.mean(np.asarray(self.alpha_np_inv_m, dtype=float)))
+
+        profile = self._undepleted_pump_power_w(z)
+        # 初值：未耗尽泵浦剖面 + 逐箱速率，积分出完整的 ps(z)，供后向泵使用。
+        rate = gamma.T @ profile - alpha_s  # (n_bins, n_steps+1)
+        exponent = np.concatenate(
+            (
+                np.zeros((n_bins, 1)),
+                np.cumsum(0.5 * (rate[:, :-1] + rate[:, 1:]) * dz, axis=1),
+            ),
+            axis=1,
+        )
+        ps0 = (input_power_w * bin_weights)[:, None]
+        ps = ps0 * np.exp(exponent)
+
+        pp_coupling = self._pump_pump_coupling()
+        if pp_coupling is not None:
+            pp_rows_fwd = pp_coupling[fwd_idx]
+            pp_rows_bwd = pp_coupling[bwd_idx]
+        # 后向泵 + 泵浦-泵浦转移时，从 z=L 反向积分 dP/dz=+λP 是强不稳定的：
+        # 直接替换整条剖面会让不动点出现周期 2 振荡。这里对后向泵剖面做
+        # 欠松弛；没有泵浦-泵浦项时保持原样（收敛很快）。
+        backward_relaxation = 0.5 if pp_coupling is not None else 1.0
+
+        def interpolate_signal(zz: float) -> np.ndarray:
+            """把 ``ps``（逐箱）线性插值到 ``zz``。"""
+            index = int(np.searchsorted(z, zz, side="right") - 1)
+            index = min(max(index, 0), n_steps - 1)
+            weight = (zz - z[index]) / dz
+            return ps[:, index] * (1.0 - weight) + ps[:, index + 1] * weight
+
+        def backward_rhs(zz: float, y: np.ndarray) -> np.ndarray:
+            signal = interpolate_signal(zz)
+            d_pumps = alphas[bwd_idx] * y + y * (depletion_rate[bwd_idx] @ signal)
+            if pp_coupling is not None:
+                total = np.zeros(self.n_pumps, dtype=float)
+                total[bwd_idx] = y
+                if fwd_idx.size:
+                    total[fwd_idx] = [np.interp(zz, z, profile[i]) for i in fwd_idx]
+                d_pumps = d_pumps - y * (pp_rows_bwd @ total)
+            return -signs[bwd_idx] * d_pumps
+
+        def forward_rhs(zz: float, y: np.ndarray) -> np.ndarray:
+            signal = y[:n_bins]
+            forward_powers = y[n_bins:]
+            total = np.zeros(self.n_pumps, dtype=float)
+            total[fwd_idx] = forward_powers
+            if bwd_idx.size:
+                total[bwd_idx] = [np.interp(zz, z, profile[i]) for i in bwd_idx]
+            d_signal = (gamma.T @ total - alpha_s) * signal
+            d_pumps = (
+                alphas[fwd_idx] * forward_powers
+                + forward_powers * (depletion_rate[fwd_idx] @ signal)
+            )
+            if pp_coupling is not None:
+                d_pumps = d_pumps - forward_powers * (pp_rows_fwd @ total)
+            return np.concatenate((d_signal, -signs[fwd_idx] * d_pumps))
+
+        nominal = np.maximum(
+            np.array([pump.power_w for pump in self.pumps], dtype=float), 1e-30
+        )
+        converged = False
+        iterations = 0
+        for iteration in range(1, self.depleted_max_iterations + 1):
+            iterations = iteration
+            previous_profile = profile.copy()
+            previous_ps = ps
+
+            if bwd_idx.size:
+                y = profile[bwd_idx, -1].copy()
+                updated = np.empty_like(profile[bwd_idx])
+                updated[:, -1] = y
+                for k in range(n_steps, 0, -1):
+                    z0 = z[k]
+                    h = -dz
+                    k1 = backward_rhs(z0, y)
+                    k2 = backward_rhs(z0 + h / 2, y + 0.5 * h * k1)
+                    k3 = backward_rhs(z0 + h / 2, y + 0.5 * h * k2)
+                    k4 = backward_rhs(z0 + h, y + h * k3)
+                    y = y + h * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
+                    updated[:, k - 1] = y
+                if backward_relaxation >= 1.0:
+                    profile[bwd_idx] = updated
+                else:
+                    profile[bwd_idx] = (
+                        (1.0 - backward_relaxation) * previous_profile[bwd_idx]
+                        + backward_relaxation * updated
+                    )
+
+            y = np.concatenate((input_power_w * bin_weights, profile[fwd_idx, 0]))
+            updated_y = np.empty((n_bins + fwd_idx.size, n_steps + 1))
+            updated_y[:, 0] = y
+            for k in range(n_steps):
+                z0 = z[k]
+                k1 = forward_rhs(z0, y)
+                k2 = forward_rhs(z0 + dz / 2, y + 0.5 * dz * k1)
+                k3 = forward_rhs(z0 + dz / 2, y + 0.5 * dz * k2)
+                k4 = forward_rhs(z0 + dz, y + dz * k3)
+                y = y + dz * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
+                updated_y[:, k + 1] = y
+            ps = updated_y[:n_bins]
+            profile[fwd_idx] = updated_y[n_bins:]
+
+            pump_error = float(
+                np.max(np.abs(profile - previous_profile) / nominal[:, None])
+            )
+            signal_error = float(
+                np.max(np.abs(ps - previous_ps)) / max(input_power_w, 1e-30)
+            )
+            if max(pump_error, signal_error) < self.depleted_tolerance:
+                converged = True
+                break
+        passive_loss = _trapezoid(alphas[:, None] * profile, z, axis=1)
+        transfer = _trapezoid(profile * (depletion_rate @ ps), z, axis=1)
+        gain_per_bin = gamma.T @ profile  # (n_bins, n_steps+1)
+        signal_gain = float(_trapezoid(np.sum(gain_per_bin * ps, axis=0), z))
+        signal_photon_gain = float(
+            _trapezoid(np.sum(gain_per_bin * ps / bin_freqs[:, None], axis=0), z)
+        )
+        pump_photon_transfer = float(np.sum(transfer / pump_freqs))
+        if pp_coupling is None:
+            pp_sent = np.zeros(self.n_pumps)
+            pp_received = np.zeros(self.n_pumps)
+        else:
+            contrib = pp_coupling[:, :, None] * profile[:, None, :] * profile[None, :, :]
+            pp_sent = _trapezoid(np.maximum(-contrib, 0.0).sum(axis=1), z, axis=1)
+            pp_received = _trapezoid(np.maximum(contrib, 0.0).sum(axis=1), z, axis=1)
+        pp_net = pp_received - pp_sent
+        pumps_diag = []
+        for index, pump in enumerate(self.pumps):
+            launch = float(
+                profile[index, 0] if pump.direction == "forward" else profile[index, -1]
+            )
+            residual = float(
+                profile[index, -1] if pump.direction == "forward" else profile[index, 0]
+            )
+            pumps_diag.append(
+                {
+                    "direction": pump.direction,
+                    "launch_power_w": launch,
+                    "residual_power_w": residual,
+                    "passive_loss_w": float(passive_loss[index]),
+                    "transferred_to_signal_w": float(transfer[index]),
+                    "pump_pump_sent_w": float(pp_sent[index]),
+                    "pump_pump_received_w": float(pp_received[index]),
+                    "pump_pump_net_w": float(pp_net[index]),
+                }
+            )
+        diagnostics = {
+            "pumps": pumps_diag,
+            "signal_raman_gain_w": signal_gain,
+            "iterations": iterations,
+            "converged": converged,
+            "step_m": dz,
+            "pump_pump_raman": self.pump_pump_raman,
+            "pump_pump_net_total_w": float(np.sum(pp_net)),
+            "signal_out_w": float(np.sum(ps[:, -1])),
+            "spectral_bins": n_bins,
+            "depletion_model": "spectral",
+            "signal_photon_gain_per_s": signal_photon_gain,
+            "pump_photon_transfer_per_s": pump_photon_transfer,
         }
         return z, profile, ps, diagnostics
 
@@ -759,7 +1147,17 @@ class DistributedRamanFiber(FiberChannel):
             input_power_w = float(np.sum(np.mean(np.abs(opt_signal.data.astype(np.complex128)) ** 2, axis=1)))
             band_freqs_hz: np.ndarray | None = None
             band_weights: np.ndarray | None = None
-            if self.depletion_coupling == "band_average":
+            bin_freqs_hz: np.ndarray | None = None
+            bin_weights: np.ndarray | None = None
+            if self.depletion_model == "spectral":
+                # 逐频箱功率分布：与 SSFM 逐频率增益同口径，驱动泵浦耗尽。
+                bin_freqs_hz, bin_weights = signal_spectrum_bins(
+                    opt_signal.data.astype(np.complex128),
+                    opt_signal.ctx.sample_rate,
+                    opt_signal.ctx.center_freq,
+                    self.spectral_bins,
+                )
+            elif self.depletion_coupling == "band_average":
                 # 用输入信号的功率谱做带内加权：泵浦消耗与逐频率增益同口径。
                 n_samples = opt_signal.num_samples
                 sample_rate = opt_signal.ctx.sample_rate
@@ -783,6 +1181,8 @@ class DistributedRamanFiber(FiberChannel):
                 opt_signal.ctx.center_freq,
                 band_freqs_hz=band_freqs_hz,
                 band_weights=band_weights,
+                bin_freqs_hz=bin_freqs_hz,
+                bin_weights=bin_weights,
             )
 
         step_gain = self._make_step_gain(opt_signal.ctx.center_freq) if self.pumps else None
@@ -822,25 +1222,44 @@ class DistributedRamanFiber(FiberChannel):
             }
         )
         if self.pump_model == "depleted" and self.pumps and self._depletion_diagnostics is not None:
+            if self.depletion_model == "spectral":
+                detail = (
+                    "coupled signal/pump power ODE along z (RK4), signal represented by "
+                    f"{self._depletion_diagnostics['spectral_bins']} frequency bins with "
+                    "per-bin depletion coupling; depletion_coupling is not used; "
+                    "backward pumps solved by fixed-point iteration; "
+                    + (
+                        "pump-pump Raman transfer included (pairwise photon-number "
+                        "conserving)"
+                        if self.pump_pump_raman
+                        else "no pump-pump Raman transfer"
+                    )
+                )
+                coupling_meta = None
+            else:
+                detail = (
+                    "coupled signal/pump power ODE along z (RK4), signal represented by its "
+                    "in-band total power; depletion coupling "
+                    + (
+                        "taken at the centre frequency"
+                        if self.depletion_coupling == "center"
+                        else "is the signal-PSD weighted band average"
+                    )
+                    + "; backward pumps solved by fixed-point iteration; "
+                    + (
+                        "pump-pump Raman transfer included (pairwise photon-number "
+                        "conserving)"
+                        if self.pump_pump_raman
+                        else "no pump-pump Raman transfer"
+                    )
+                )
+                coupling_meta = self.depletion_coupling
             output.ctx.meta.update(
                 {
-                    "dra_pump_model_detail": (
-                        "coupled signal/pump power ODE along z (RK4), signal represented by its "
-                        "in-band total power; depletion coupling "
-                        + (
-                            "taken at the centre frequency"
-                            if self.depletion_coupling == "center"
-                            else "is the signal-PSD weighted band average"
-                        )
-                        + "; backward pumps solved by fixed-point iteration; "
-                        + (
-                            "pump-pump Raman transfer included (pairwise photon-number "
-                            "conserving)"
-                            if self.pump_pump_raman
-                            else "no pump-pump Raman transfer"
-                        )
-                    ),
-                    "dra_depletion_coupling": self.depletion_coupling,
+                    "dra_pump_model_detail": detail,
+                    "dra_depletion_model": self.depletion_model,
+                    "dra_spectral_bins": self._depletion_diagnostics["spectral_bins"],
+                    "dra_depletion_coupling": coupling_meta,
                     "dra_pump_pump_raman": bool(self.pump_pump_raman),
                     "dra_pump_energy_balance": self._depletion_diagnostics,
                     "dra_depletion_converged": bool(self._depletion_diagnostics["converged"]),
@@ -948,7 +1367,9 @@ __all__ = [
     "DEFAULT_RAMAN_PEAK_SHIFT_HZ",
     "DEFAULT_RAMAN_SIGMA_HZ",
     "DEPLETION_COUPLINGS",
+    "DEPLETION_MODELS",
     "PUMP_MODELS",
     "DistributedRamanFiber",
     "raman_gain_spectrum",
+    "signal_spectrum_bins",
 ]
